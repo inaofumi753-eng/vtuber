@@ -1,4 +1,4 @@
-"""Application orchestration for V0.1 Foundation.""
+"""Application orchestration for V0.1 Foundation."""
 
 from __future__ import annotations
 
