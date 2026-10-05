@@ -1,8 +1,8 @@
 # Example only. Never place real credentials here.
+# V0.1 actively uses only [app].name, [database].path and [logging].level.
 
 [app]
 name = "VTuber Bot"
-performance_profile = "balanced"
 
 [database]
 path = "data/vtuber.sqlite3"
@@ -10,6 +10,7 @@ path = "data/vtuber.sqlite3"
 [logging]
 level = "INFO"
 
+# Future V0.x placeholders. They are intentionally ignored by V0.1.
 [avatar]
 target_fps = 30
 
