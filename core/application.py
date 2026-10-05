@@ -1,4 +1,4 @@
-"""Application orchestration for V0.1 Foundation."""
+"""Application orchestration for V0.1 Foundation.""
 
 from __future__ import annotations
 
@@ -79,6 +79,7 @@ class Application:
             raise RuntimeError(f"Cannot initialize from state {self._state.value}.")
 
         self._state = AppState.STARTING
+        self._internal_test_events_processed = 0
         self._resource_manager = ResourceManager()
 
         try:
@@ -91,8 +92,8 @@ class Application:
 
             self._database = SQLiteDatabase(self._config.database_path)
             self._database.open()
-            self._database.initialize_schema()
             self._resource_manager.register("database", self._database.close)
+            self._database.initialize_schema()
 
             self._event_manager = EventManager(self._logger)
             self._task_scheduler = TaskScheduler(self._logger)
