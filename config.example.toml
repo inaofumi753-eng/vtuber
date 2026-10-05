@@ -1,0 +1,26 @@
+# Example only. Never place real credentials here.
+
+[app]
+name = "VTuber Bot"
+performance_profile = "balanced"
+
+[database]
+path = "data/vtuber.sqlite3"
+
+[logging]
+level = "INFO"
+
+[avatar]
+target_fps = 30
+
+[voice]
+enabled = false
+
+[twitch]
+enabled = false
+
+[telegram]
+enabled = false
+
+[obs]
+enabled = false
