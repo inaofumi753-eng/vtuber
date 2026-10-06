@@ -862,3 +862,10 @@ No construir una copia de VTube Studio.
 No construir un clon de Speaker.bot.
 
 Construir **nuestro propio sistema**, utilizando las soluciones existentes donde aporten valor y manteniendo una frontera clara entre nuestro código y el software externo.
+
+
+## 28. Limpieza de ramas — 2026-10-06
+
+Se eliminaron y verificaron 32 ramas de auditoría cerradas. Solo permanece `audit/piper-master` porque la revisión del ZIP histórico exacto quedó pendiente.
+
+La eliminación de una rama no elimina automáticamente los Releases `audit-*` ni sus assets; esos elementos se consideran una limpieza separada.
