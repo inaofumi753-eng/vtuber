@@ -1,1 +1,136 @@
-namespace VtuberBot.Core;public sealed class TaskScheduler:IDisposable{readonly object g=new();readonly List<(long,DateTimeOffset,Action)>q=[];readonly ILogger l;CancellationTokenSource?c;Task?w;long id;bool stopped;public TaskScheduler(ILogger x)=>l=x;public long ScheduleOnce(TimeSpan d,Action a){if(d<TimeSpan.Zero)throw new ArgumentOutOfRangeException(nameof(d));lock(g){if(stopped)throw new InvalidOperationException();var n=++id;q.Add((n,DateTimeOffset.UtcNow+d,a));q.Sort((x,y)=>x.Item2.CompareTo(y.Item2));c??=new();w??=Task.Run(()=>Run(c.Token));return n;}}public bool Cancel(long n){lock(g)return q.RemoveAll(x=>x.Item1==n)>0;}async Task Run(CancellationToken t){while(!t.IsCancellationRequested){(long,DateTimeOffset,Action)?x;lock(g)x=q.Count==0?null:q[0];if(x is null){try{await Task.Delay(25,t);}catch{}continue;}var d=x.Value.Item2-DateTimeOffset.UtcNow;if(d>TimeSpan.Zero){try{await Task.Delay(d,t);}catch{}continue;}lock(g){if(q.Count==0||q[0].Item1!=x.Value.Item1)continue;q.RemoveAt(0);}try{x.Value.Item3();}catch(Exception e){l.Error(e,"Scheduled task {0} failed.",x.Value.Item1);}}}public void Shutdown(TimeSpan?timeout=null){Task?w;lock(g){if(stopped)return;stopped=true;c?.Cancel();w=this.w;q.Clear();}if(w is not null&&!w.Wait(timeout??TimeSpan.FromSeconds(2)))l.Warning("Task scheduler shutdown timed out.");lock(g){this.w=null;c?.Dispose();c=null;}}public void Dispose()=>Shutdown();}
+namespace VtuberBot.Core;
+
+public sealed class TaskScheduler : IDisposable
+{
+    private readonly object gate = new();
+    private readonly List<(long Id, DateTimeOffset DueAt, Action Callback)> queue = [];
+    private readonly ILogger logger;
+    private CancellationTokenSource? cancellation;
+    private Task? worker;
+    private long nextId;
+    private bool stopping;
+
+    public TaskScheduler(ILogger logger) => this.logger = logger;
+
+    public long ScheduleOnce(TimeSpan delay, Action callback)
+    {
+        ArgumentNullException.ThrowIfNull(callback);
+
+        if (delay < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(delay));
+
+        lock (gate)
+        {
+            if (stopping)
+                throw new InvalidOperationException("Task scheduler is shutting down.");
+
+            var id = ++nextId;
+            queue.Add((id, DateTimeOffset.UtcNow + delay, callback));
+            queue.Sort((left, right) => left.DueAt.CompareTo(right.DueAt));
+
+            cancellation ??= new CancellationTokenSource();
+            worker ??= Task.Run(() => Run(cancellation.Token));
+            return id;
+        }
+    }
+
+    public bool Cancel(long id)
+    {
+        lock (gate)
+            return queue.RemoveAll(item => item.Id == id) > 0;
+    }
+
+    private async Task Run(CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            (long Id, DateTimeOffset DueAt, Action Callback)? next;
+
+            lock (gate)
+                next = queue.Count == 0 ? null : queue[0];
+
+            if (next is null)
+            {
+                try
+                {
+                    await Task.Delay(25, token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+
+                continue;
+            }
+
+            var delay = next.Value.DueAt - DateTimeOffset.UtcNow;
+            if (delay > TimeSpan.Zero)
+            {
+                try
+                {
+                    await Task.Delay(delay, token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+
+                continue;
+            }
+
+            lock (gate)
+            {
+                if (queue.Count == 0 || queue[0].Id != next.Value.Id)
+                    continue;
+
+                queue.RemoveAt(0);
+            }
+
+            try
+            {
+                next.Value.Callback();
+            }
+            catch (Exception exception)
+            {
+                logger.Error(exception, "Scheduled task {0} failed.", next.Value.Id);
+            }
+        }
+    }
+
+    public void Shutdown()
+    {
+        Task? workerToWait;
+
+        lock (gate)
+        {
+            if (stopping)
+                return;
+
+            stopping = true;
+            queue.Clear();
+            cancellation?.Cancel();
+            workerToWait = worker;
+        }
+
+        if (workerToWait is not null)
+        {
+            try
+            {
+                workerToWait.GetAwaiter().GetResult();
+            }
+            catch (Exception exception)
+            {
+                logger.Error(exception, "Task scheduler worker failed during shutdown.");
+            }
+        }
+
+        lock (gate)
+        {
+            worker = null;
+            cancellation?.Dispose();
+            cancellation = null;
+        }
+    }
+
+    public void Dispose() => Shutdown();
+}
