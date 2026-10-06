@@ -1,4 +1,5 @@
 using Xunit;
+using CoreTaskScheduler = VtuberBot.Core.TaskScheduler;
 using Microsoft.Data.Sqlite;
 using System.Diagnostics;
 using VtuberBot.Core;
@@ -190,11 +191,11 @@ public sealed class Tests
     {
         var manager = new EventManager(new TestLogger());
         var calls = 0;
-        Action<AppEvent>? handler = null;
+        Action<AppEvent> handler = null!;
         handler = _ =>
         {
             calls++;
-            manager.Unsubscribe("event", handler);
+            manager.Unsubscribe("event", handler!);
         };
 
         manager.Subscribe("event", handler);
@@ -272,56 +273,56 @@ public sealed class Tests
     [Fact]
     public void SchedulerExecutesNormalCallback()
     {
-        using var scheduler = new TaskScheduler(new TestLogger());
+        using var scheduler = new CoreTaskScheduler(new TestLogger());
         using var signal = new ManualResetEventSlim();
 
         scheduler.ScheduleOnce(TimeSpan.FromMilliseconds(20), signal.Set);
 
-        Assert.True(signal.Wait(TimeSpan.FromSeconds(1)));
+        Assert.True(signal.Wait(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
     }
 
     [Fact]
     public void SchedulerCancellationPreventsCallback()
     {
-        using var scheduler = new TaskScheduler(new TestLogger());
+        using var scheduler = new CoreTaskScheduler(new TestLogger());
         using var signal = new ManualResetEventSlim();
 
         var id = scheduler.ScheduleOnce(TimeSpan.FromMilliseconds(200), signal.Set);
 
         Assert.True(scheduler.Cancel(id));
         Assert.False(scheduler.Cancel(id));
-        Assert.False(signal.Wait(TimeSpan.FromMilliseconds(400)));
+        Assert.False(signal.Wait(TimeSpan.FromMilliseconds(400), TestContext.Current.CancellationToken));
     }
 
     [Fact]
     public void SchedulerSupportsMultipleTasks()
     {
-        using var scheduler = new TaskScheduler(new TestLogger());
+        using var scheduler = new CoreTaskScheduler(new TestLogger());
         using var signal = new CountdownEvent(3);
 
         scheduler.ScheduleOnce(TimeSpan.FromMilliseconds(10), signal.Signal);
         scheduler.ScheduleOnce(TimeSpan.FromMilliseconds(20), signal.Signal);
         scheduler.ScheduleOnce(TimeSpan.FromMilliseconds(30), signal.Signal);
 
-        Assert.True(signal.Wait(TimeSpan.FromSeconds(1)));
+        Assert.True(signal.Wait(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
     }
 
     [Fact]
     public void SchedulerIsolatesCallbackFailure()
     {
-        using var scheduler = new TaskScheduler(new TestLogger());
+        using var scheduler = new CoreTaskScheduler(new TestLogger());
         using var signal = new ManualResetEventSlim();
 
         scheduler.ScheduleOnce(TimeSpan.FromMilliseconds(10), () => throw new InvalidOperationException("expected"));
         scheduler.ScheduleOnce(TimeSpan.FromMilliseconds(20), signal.Set);
 
-        Assert.True(signal.Wait(TimeSpan.FromSeconds(1)));
+        Assert.True(signal.Wait(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
     }
 
     [Fact]
     public void SchedulerShutdownDiscardsPendingTasks()
     {
-        using var scheduler = new TaskScheduler(new TestLogger());
+        using var scheduler = new CoreTaskScheduler(new TestLogger());
         using var signal = new ManualResetEventSlim();
 
         scheduler.ScheduleOnce(TimeSpan.FromSeconds(1), signal.Set);
@@ -335,7 +336,7 @@ public sealed class Tests
     [Fact]
     public void SchedulerShutdownWaitsForRunningCallback()
     {
-        using var scheduler = new TaskScheduler(new TestLogger());
+        using var scheduler = new CoreTaskScheduler(new TestLogger());
         using var started = new ManualResetEventSlim();
         using var finished = new ManualResetEventSlim();
 
@@ -346,7 +347,7 @@ public sealed class Tests
             finished.Set();
         });
 
-        Assert.True(started.Wait(TimeSpan.FromSeconds(1)));
+        Assert.True(started.Wait(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
         scheduler.Shutdown();
 
         Assert.True(finished.IsSet);
@@ -438,7 +439,7 @@ public sealed class Tests
     }
 
     [Fact]
-    public void ProcessConcurrentStopIsSafe()
+    public async Task ProcessConcurrentStopIsSafe()
     {
         using var process = CreateLongRunningProcess();
         process.Start();
@@ -447,7 +448,7 @@ public sealed class Tests
             .Select(_ => System.Threading.Tasks.Task.Run(() => process.Stop()))
             .ToArray();
 
-        System.Threading.Tasks.Task.WaitAll(stops);
+        await System.Threading.Tasks.Task.WhenAll(stops);
 
         Assert.False(process.IsRunning);
         Assert.All(stops, task => Assert.Null(task.Exception));
@@ -600,7 +601,7 @@ public sealed class Tests
     {
         public TempDirectory()
         {
-            Path = Directory.CreateTempSubdirectory("vtuber-tests-").FullName;
+            Path = System.IO.Directory.CreateTempSubdirectory("vtuber-tests-").FullName;
         }
 
         public string Path { get; }
