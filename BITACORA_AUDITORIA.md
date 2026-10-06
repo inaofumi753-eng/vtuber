@@ -869,3 +869,16 @@ Construir **nuestro propio sistema**, utilizando las soluciones existentes donde
 Se eliminaron y verificaron 32 ramas de auditoría cerradas. Solo permanece `audit/piper-master` porque la revisión del ZIP histórico exacto quedó pendiente.
 
 La eliminación de una rama no elimina automáticamente los Releases `audit-*` ni sus assets; esos elementos se consideran una limpieza separada.
+
+
+## 29. Corrección de estado de ramas — 2026-10-06
+
+La sección 24 conserva el estado histórico registrado cuando `audit/piper-master` seguía pendiente de verificación.
+
+Al revisar nuevamente el estado real de GitHub para esta corrección, `audit/piper-master` ya no existe como rama. La única rama existente actualmente es `main`.
+
+Por lo tanto:
+
+- `audit/piper-master` ya no está pendiente como rama de auditoría.
+- Su eliminación se registra en `ataud`, junto con las demás ramas de auditoría eliminadas.
+- La entrada histórica de la sección 24 se conserva sin reescribirla, para mantener la trazabilidad del estado que existía en ese momento.

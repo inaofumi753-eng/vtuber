@@ -48,13 +48,13 @@ class FakeVAD:
         return bool(audio_frame) and sample_rate > 0
 
 
-def test_backend_protocols_are_usable() -> None:
+def test_backend_protocols_are_usable(tmp_path: Path) -> None:
     tts: TTSBackend = FakeTTS()
     stt: STTBackend = FakeSTT()
     vad: VADBackend = FakeVAD()
 
     request = SpeechRequest('hello', priority=SpeechPriority.HIGH)
-    output = Path('test-output.wav')
+    output = tmp_path / 'test-output.wav'
     try:
         assert tts.synthesize(request, output) == output
         output.write_text('transcribed')
