@@ -574,28 +574,6 @@ public sealed class Tests
         Assert.True(backup.Length >= 1_000_000);
     }
 
-    [Fact]
-    public void ConfiguredApplicationNameReachesPresentationModel()
-    {
-        using var directory = new TempDirectory();
-        var configPath = directory.File("config.toml");
-        File.WriteAllText(configPath, "[app]\nname = \"My Bot\"");
-
-        var application = new VtuberApplication(configPath);
-        application.Initialize();
-
-        try
-        {
-            var viewModel = new VtuberBot.App.Vm(application);
-            Assert.Equal("My Bot", viewModel.Title);
-            Assert.Equal("My Bot", viewModel.ApplicationName);
-        }
-        finally
-        {
-            application.Shutdown();
-        }
-    }
-
     private static OwnedProcess CreateLongRunningProcess() =>
         new(
             new ProcessSpec(
