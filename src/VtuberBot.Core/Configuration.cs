@@ -23,7 +23,7 @@ public sealed record AppConfig(
     public static AppConfig Load(string? configPath = null)
     {
         var path = configPath is null
-            ? Path.Combine(Directory.GetCurrentDirectory(), "config.toml")
+            ? Path.Combine(GetDefaultBaseDirectory(), "config.toml")
             : Path.GetFullPath(configPath);
 
         TomlTable root;
@@ -38,10 +38,14 @@ public sealed record AppConfig(
             throw new ConfigException($"Invalid TOML in {path}: {exception.Message}", exception);
         }
 
-        TomlTable Table(string name) =>
-            root.TryGetValue(name, out var value) && value is TomlTable table
-                ? table
-                : new TomlTable();
+        TomlTable Table(string name)
+        {
+            if (!root.TryGetValue(name, out var value))
+                return new TomlTable();
+
+            return value as TomlTable
+                ?? throw new ConfigException($"[{name}] must be a TOML table.");
+        }
 
         string StringValue(TomlTable table, string key, string defaultValue) =>
             !table.TryGetValue(key, out var value)
@@ -49,7 +53,7 @@ public sealed record AppConfig(
                 : value as string ?? throw new ConfigException($"[{key}] must be a string.");
 
         var baseDirectory = configPath is null
-            ? Directory.GetCurrentDirectory()
+            ? GetDefaultBaseDirectory()
             : Path.GetDirectoryName(path)!;
 
         var app = Table("app");
@@ -63,7 +67,10 @@ public sealed record AppConfig(
         if (string.IsNullOrWhiteSpace(name))
             throw new ConfigException("[app].name must not be empty.");
 
-        if (!Enum.TryParse(level, ignoreCase: true, out LogLevel logLevel))
+        if (string.IsNullOrWhiteSpace(databasePath))
+            throw new ConfigException("[database].path must not be empty.");
+
+        if (!Enum.TryParse(level.Trim(), ignoreCase: true, out LogLevel logLevel))
             throw new ConfigException($"Invalid logging level: {level}.");
 
         return new(
@@ -72,5 +79,20 @@ public sealed record AppConfig(
             baseDirectory,
             logLevel,
             File.Exists(path) ? path : null);
+    }
+
+    private static string GetDefaultBaseDirectory()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+
+        while (directory is not null)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "PROJECT_SPEC.md")))
+                return directory.FullName;
+
+            directory = directory.Parent;
+        }
+
+        return AppContext.BaseDirectory;
     }
 }

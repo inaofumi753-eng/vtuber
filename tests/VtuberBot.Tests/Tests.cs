@@ -110,6 +110,58 @@ public sealed class Tests
     }
 
     [Fact]
+    public void ConfigWrongAppSectionTypeThrows()
+    {
+        using var directory = new TempDirectory();
+        var path = directory.File("config.toml");
+        File.WriteAllText(path, "app = \"not-a-table\"");
+
+        Assert.Throws<ConfigException>(() => AppConfig.Load(path));
+    }
+
+    [Fact]
+    public void ConfigWrongDatabaseSectionTypeThrows()
+    {
+        using var directory = new TempDirectory();
+        var path = directory.File("config.toml");
+        File.WriteAllText(path, "database = \"not-a-table\"");
+
+        Assert.Throws<ConfigException>(() => AppConfig.Load(path));
+    }
+
+    [Fact]
+    public void ConfigWrongLoggingSectionTypeThrows()
+    {
+        using var directory = new TempDirectory();
+        var path = directory.File("config.toml");
+        File.WriteAllText(path, "logging = \"not-a-table\"");
+
+        Assert.Throws<ConfigException>(() => AppConfig.Load(path));
+    }
+
+    [Fact]
+    public void ConfigEmptyDatabasePathThrows()
+    {
+        using var directory = new TempDirectory();
+        var path = directory.File("config.toml");
+        File.WriteAllText(path, "[database]\npath = \"\"");
+
+        Assert.Throws<ConfigException>(() => AppConfig.Load(path));
+    }
+
+    [Fact]
+    public void ConfigDefaultBaseDirectory()
+    {
+        var config = AppConfig.Load();
+
+        Assert.True(File.Exists(Path.Combine(config.BaseDirectory, "PROJECT_SPEC.md")));
+        Assert.Equal(
+            Path.GetFullPath(Path.Combine(config.BaseDirectory, "data", "vtuber.sqlite3")),
+            config.DatabasePath);
+    }
+
+
+    [Fact]
     public void DatabaseCreatesSchemaAndEnablesForeignKeys()
     {
         using var directory = new TempDirectory();
@@ -418,6 +470,85 @@ public sealed class Tests
     }
 
     [Fact]
+    public void ProcessWaitAndStopCanRunConcurrently()
+    {
+        var process = CreateLongRunningProcess();
+        try
+        {
+            process.Start();
+            var waitTask = System.Threading.Tasks.Task.Run(() => process.Wait());
+
+            Assert.True(
+                SpinWait.SpinUntil(
+                    () => GetActiveWaiters(process) > 0,
+                    TimeSpan.FromSeconds(1)));
+
+            var stopTask = System.Threading.Tasks.Task.Run(() => process.Stop());
+            Assert.True(stopTask.Wait(TimeSpan.FromSeconds(2)));
+            Assert.True(waitTask.Wait(TimeSpan.FromSeconds(2)));
+            Assert.False(process.IsRunning);
+        }
+        finally
+        {
+            process.Stop();
+        }
+    }
+
+    [Fact]
+    public void ProcessWaitAndDisposeCanRunConcurrently()
+    {
+        var process = CreateLongRunningProcess();
+        try
+        {
+            process.Start();
+            var waitTask = System.Threading.Tasks.Task.Run(() => process.Wait());
+
+            Assert.True(
+                SpinWait.SpinUntil(
+                    () => GetActiveWaiters(process) > 0,
+                    TimeSpan.FromSeconds(1)));
+
+            var disposeTask = System.Threading.Tasks.Task.Run(process.Dispose);
+            Assert.True(disposeTask.Wait(TimeSpan.FromSeconds(2)));
+            Assert.True(waitTask.Wait(TimeSpan.FromSeconds(2)));
+            Assert.False(process.IsRunning);
+        }
+        finally
+        {
+            process.Dispose();
+        }
+    }
+
+    [Fact]
+    public void ProcessWaitAndRestartCanRunConcurrently()
+    {
+        var process = CreateLongRunningProcess();
+        try
+        {
+            var firstPid = process.Start();
+            var waitTask = System.Threading.Tasks.Task.Run(() => process.Wait());
+
+            Assert.True(
+                SpinWait.SpinUntil(
+                    () => GetActiveWaiters(process) > 0,
+                    TimeSpan.FromSeconds(1)));
+
+            var restartTask = System.Threading.Tasks.Task.Run(() => process.Restart());
+            Assert.True(restartTask.Wait(TimeSpan.FromSeconds(2)));
+
+            var secondPid = restartTask.Result;
+            Assert.NotEqual(firstPid, secondPid);
+            Assert.True(waitTask.Wait(TimeSpan.FromSeconds(2)));
+            Assert.Equal(secondPid, process.Pid);
+        }
+        finally
+        {
+            process.Stop();
+        }
+    }
+
+
+    [Fact]
     public void ProcessMissingCwd()
     {
         using var process = new OwnedProcess(
@@ -526,6 +657,43 @@ public sealed class Tests
 
         Assert.Null(process.Pid);
     }
+
+    [Fact]
+    public void ProcessEnvironmentOverridesArePassedToChild()
+    {
+        using var process = new OwnedProcess(
+            new ProcessSpec(
+                ["cmd.exe", "/c", "if \"%VTUBER_TEST_ENV%\"==\"expected\" (exit /b 0) else (exit /b 9)"],
+                Environment: new Dictionary<string, string>
+                {
+                    ["VTUBER_TEST_ENV"] = "expected"
+                }),
+            new TestLogger());
+
+        process.Start();
+
+        Assert.Equal(0, process.Wait(TimeSpan.FromSeconds(3)));
+        Assert.Null(process.Pid);
+    }
+
+    [Fact]
+    public void StopRejectsNegativeTimeout()
+    {
+        using var process = CreateLongRunningProcess();
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => process.Stop(TimeSpan.FromSeconds(-1)));
+    }
+
+    [Fact]
+    public void WaitRejectsNegativeTimeout()
+    {
+        using var process = CreateLongRunningProcess();
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => process.Wait(TimeSpan.FromSeconds(-1)));
+    }
+
 
     [Fact]
     public void ProcessDisposeIsIdempotent()
