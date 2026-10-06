@@ -300,9 +300,9 @@ public sealed class Tests
         using var scheduler = new CoreTaskScheduler(new TestLogger());
         using var signal = new CountdownEvent(3);
 
-        scheduler.ScheduleOnce(TimeSpan.FromMilliseconds(10), signal.Signal);
-        scheduler.ScheduleOnce(TimeSpan.FromMilliseconds(20), signal.Signal);
-        scheduler.ScheduleOnce(TimeSpan.FromMilliseconds(30), signal.Signal);
+        scheduler.ScheduleOnce(TimeSpan.FromMilliseconds(10), () => signal.Signal());
+        scheduler.ScheduleOnce(TimeSpan.FromMilliseconds(20), () => signal.Signal());
+        scheduler.ScheduleOnce(TimeSpan.FromMilliseconds(30), () => signal.Signal());
 
         Assert.True(signal.Wait(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
     }
@@ -609,7 +609,7 @@ public sealed class Tests
         public string File(params string[] parts)
         {
             var path = System.IO.Path.Combine(new[] { Path }.Concat(parts).ToArray());
-            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
             return path;
         }
 
