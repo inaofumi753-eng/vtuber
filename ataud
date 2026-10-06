@@ -1,42 +1,18 @@
 # ATAÚD — Ramas de auditoría eliminadas
 
-Estas ramas fueron eliminadas y verificadas en GitHub el 2026-10-06.
+Estas ramas fueron eliminadas y verificadas en GitHub.
 
-## Eliminadas y verificadas
+## Ramas de auditoría eliminadas
 
-- audit/airi-0.11.3
-- audit/airi-0.12.0-beta.5
-- audit/distroav-master
-- audit/gpt-sovits-main
-- audit/koboldcpp-concedo
-- audit/kokoro-main
-- audit/mediamtx-main
-- audit/mixitup-desktop_1.8.201
-- audit/obs-studio-32.2.2-windows-x64
-- audit/obs-websocket-4.x-compat
-- audit/obs-websocket-master
-- audit/obs-websocket-master--1-
-- audit/open-llm-vtuber-main
-- audit/openseeface-master
-- audit/pyvts-51-sending-requests-is-actually-blocking
-- audit/pyvts-gh-pages
-- audit/pyvts-main
-- audit/quasar-master
-- audit/rustdesk-master
-- audit/sherpa-onnx-master
-- audit/silero-vad-master
-- audit/speaker-bot
-- audit/streamer-bot
-- audit/streamfx-public-root
-- audit/twitchio-3.3.2
-- audit/twitchio-main
-- audit/twitchio-master
-- audit/twitchio-patch-3.2.2
-- audit/twitchio-pinned_messages
-- audit/vseeface-v1.13.38c5
-- audit/vtube-studio
-- audit/whisper.cpp-master
+System.Object[]
 
-## Conservada
+## Estado final
 
-- audit/piper-master — pendiente de verificar exactamente el ZIP histórico antes de eliminarla.
+- audit/*: eliminadas
+- frankenstein: eliminado
+- integration/frankenstein-*: eliminadas
+- Releases audit-*: eliminados
+- tags audit-*: eliminados
+- main: conservado
+
+Los ZIP originales de auditoría se conservan únicamente fuera de GitHub.
