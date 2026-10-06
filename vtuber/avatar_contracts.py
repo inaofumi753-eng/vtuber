@@ -1,0 +1,16 @@
+"""Provider-neutral avatar adapter contracts."""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+class AvatarBackend(Protocol):
+    """Synchronous boundary for an external avatar runtime such as VTube Studio."""
+
+    name: str
+
+    def connect(self) -> None: ...
+    def disconnect(self) -> None: ...
+    def set_parameter(self, parameter: str, value: float, weight: float = 1.0) -> None: ...
+    def trigger_hotkey(self, hotkey_id: str) -> None: ...
+    def set_expression(self, expression_id: str, enabled: bool = True) -> None: ...
