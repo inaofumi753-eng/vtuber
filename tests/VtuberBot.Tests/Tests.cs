@@ -2,6 +2,7 @@ using Xunit;
 using CoreTaskScheduler = VtuberBot.Core.TaskScheduler;
 using Microsoft.Data.Sqlite;
 using System.Diagnostics;
+using System.Reflection;
 using VtuberBot.Core;
 
 namespace VtuberBot.Tests;
@@ -470,7 +471,7 @@ public sealed class Tests
     }
 
     [Fact]
-    public void ProcessWaitAndStopCanRunConcurrently()
+    public async Task ProcessWaitAndStopCanRunConcurrently()
     {
         var process = CreateLongRunningProcess();
         try
@@ -484,8 +485,8 @@ public sealed class Tests
                     TimeSpan.FromSeconds(1)));
 
             var stopTask = System.Threading.Tasks.Task.Run(() => process.Stop());
-            Assert.True(stopTask.Wait(TimeSpan.FromSeconds(2)));
-            Assert.True(waitTask.Wait(TimeSpan.FromSeconds(2)));
+            await stopTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+            await waitTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
             Assert.False(process.IsRunning);
         }
         finally
@@ -495,7 +496,7 @@ public sealed class Tests
     }
 
     [Fact]
-    public void ProcessWaitAndDisposeCanRunConcurrently()
+    public async Task ProcessWaitAndDisposeCanRunConcurrently()
     {
         var process = CreateLongRunningProcess();
         try
@@ -509,8 +510,8 @@ public sealed class Tests
                     TimeSpan.FromSeconds(1)));
 
             var disposeTask = System.Threading.Tasks.Task.Run(process.Dispose);
-            Assert.True(disposeTask.Wait(TimeSpan.FromSeconds(2)));
-            Assert.True(waitTask.Wait(TimeSpan.FromSeconds(2)));
+            await disposeTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+            await waitTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
             Assert.False(process.IsRunning);
         }
         finally
@@ -520,7 +521,7 @@ public sealed class Tests
     }
 
     [Fact]
-    public void ProcessWaitAndRestartCanRunConcurrently()
+    public async Task ProcessWaitAndRestartCanRunConcurrently()
     {
         var process = CreateLongRunningProcess();
         try
@@ -534,11 +535,12 @@ public sealed class Tests
                     TimeSpan.FromSeconds(1)));
 
             var restartTask = System.Threading.Tasks.Task.Run(() => process.Restart());
-            Assert.True(restartTask.Wait(TimeSpan.FromSeconds(2)));
+            var secondPid = await restartTask.WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken);
 
-            var secondPid = restartTask.Result;
             Assert.NotEqual(firstPid, secondPid);
-            Assert.True(waitTask.Wait(TimeSpan.FromSeconds(2)));
+            await waitTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
             Assert.Equal(secondPid, process.Pid);
         }
         finally
@@ -742,6 +744,15 @@ public sealed class Tests
         Assert.True(active.Exists);
         Assert.True(backup.Exists);
         Assert.True(backup.Length >= 1_000_000);
+    }
+
+    private static int GetActiveWaiters(OwnedProcess process)
+    {
+        var field = typeof(OwnedProcess).GetField(
+            "activeWaiters",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+
+        return (int)field!.GetValue(process)!;
     }
 
     private static OwnedProcess CreateLongRunningProcess() =>
