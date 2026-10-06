@@ -82,3 +82,7 @@ The audit produced two small, dependency-free foundations that are now part of t
 - `obs/backend_contracts.py` defines the OBS control boundary.
 
 These contracts do not activate external engines in V0.1; they make later integrations replaceable without changing the core.
+
+## Audit history
+
+- `BITACORA_AUDITORIA.md` — permanent record of audited projects, licenses, architectural findings, integration decisions and future re-audit rules.
