@@ -70,3 +70,15 @@ The startup smoke test does not require a GUI session or any external service.
 - PROJECT_SPEC.md — central long-term technical specification
 - ROADMAP.md — phased development plan
 - PROMPTS.md — GPT/Gemini development workflow
+
+## Integrated audit-derived foundation
+
+The audit produced two small, dependency-free foundations that are now part of the main codebase:
+
+- `core/process_manager.py` provides `OwnedProcess` for local STT/TTS/tracking engines. It launches only explicit child commands with `shell=False` and manages only the process instance it owns.
+- `voice/contracts.py` defines provider-neutral TTS/STT/VAD contracts plus speech priorities.
+- `vtuber/avatar_contracts.py` defines the avatar runtime boundary.
+- `twitch/backend_contracts.py` defines the Twitch integration boundary.
+- `obs/backend_contracts.py` defines the OBS control boundary.
+
+These contracts do not activate external engines in V0.1; they make later integrations replaceable without changing the core.
