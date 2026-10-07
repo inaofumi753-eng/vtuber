@@ -496,6 +496,36 @@ public sealed class Tests
     }
 
     [Fact]
+    public async Task ProcessStartWhileWaitIsActiveDoesNotBlockIndefinitely()
+    {
+        var process = CreateLongRunningProcess();
+        try
+        {
+            process.Start();
+            var waitTask = System.Threading.Tasks.Task.Run(() => process.Wait());
+
+            Assert.True(
+                SpinWait.SpinUntil(
+                    () => GetActiveWaiters(process) > 0,
+                    TimeSpan.FromSeconds(1)));
+
+            var startTask = System.Threading.Tasks.Task.Run(
+                () =>
+                {
+                    Assert.Throws<ProcessManagerException>(() => process.Start());
+                });
+
+            await startTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+            process.Stop();
+            await waitTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        }
+        finally
+        {
+            process.Stop();
+        }
+    }
+
+    [Fact]
     public async Task ProcessWaitAndDisposeCanRunConcurrently()
     {
         var process = CreateLongRunningProcess();
