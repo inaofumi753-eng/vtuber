@@ -509,7 +509,7 @@ public sealed class Tests
                     () => GetActiveWaiters(process) > 0,
                     TimeSpan.FromSeconds(1)));
 
-            var disposeTask = System.Threading.Tasks.Task.Run(process.Dispose);
+            var disposeTask = System.Threading.Tasks.Task.Run(process.Dispose, TestContext.Current.CancellationToken);
             await disposeTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
             await waitTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
             Assert.False(process.IsRunning);
