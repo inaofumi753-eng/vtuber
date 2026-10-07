@@ -85,7 +85,7 @@ Telegram Web interface, event history, statistics, avatar/voice controls and dia
 Recovery, reconnection, configuration validation, secret protection, expanded tests, load testing, memory/loop/process review and long-running sessions.
 
 ## V1.0 Release
-Critical features stable, tests green, Gemini Inspector review completed, critical/high issues resolved, documentation current, simple configuration, useful logs, recovery and acceptable resource usage on the target PC.
+Critical features stable, tests green, GPT Cerebro final review completed, critical/high issues resolved, documentation current, simple configuration, useful logs, recovery and acceptable resource usage on the target PC.
 
 ## Release rule
 Do not advance merely because something works manually. It must be implemented, tested, stable, documented and free of known critical regressions.
