@@ -473,26 +473,27 @@ public sealed class Tests
     [Fact]
     public async Task ProcessWaitAndStopCanRunConcurrently()
     {
-        var process = CreateLongRunningProcess();
-        try
-        {
-            process.Start();
-            var waitTask = System.Threading.Tasks.Task.Run(() => process.Wait());
+        using var process = CreateLongRunningProcess();
+        process.Start();
 
-            Assert.True(
-                SpinWait.SpinUntil(
-                    () => GetActiveWaiters(process) > 0,
-                    TimeSpan.FromSeconds(1)));
+        var waitTask = System.Threading.Tasks.Task.Run(() => process.Wait());
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => GetActiveWaiters(process) > 0,
+                TimeSpan.FromSeconds(1)));
 
-            var stopTask = System.Threading.Tasks.Task.Run(() => process.Stop());
-            await stopTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
-            await waitTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
-            Assert.False(process.IsRunning);
-        }
-        finally
-        {
-            process.Stop();
-        }
+        var stopTask = System.Threading.Tasks.Task.Run(() => process.Stop());
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => GetActiveProcessUsers(process) > 0,
+                TimeSpan.FromSeconds(1)));
+
+        await Task.WhenAll(
+            stopTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken),
+            waitTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+
+        Assert.False(process.IsRunning);
+        Assert.Null(process.Pid);
     }
 
     [Fact]
@@ -529,54 +530,90 @@ public sealed class Tests
     [Fact]
     public async Task ProcessWaitAndDisposeCanRunConcurrently()
     {
-        var process = CreateLongRunningProcess();
-        try
-        {
-            process.Start();
-            var waitTask = System.Threading.Tasks.Task.Run(() => process.Wait());
+        using var process = CreateLongRunningProcess();
+        process.Start();
 
-            Assert.True(
-                SpinWait.SpinUntil(
-                    () => GetActiveWaiters(process) > 0,
-                    TimeSpan.FromSeconds(1)));
+        var waitTask = System.Threading.Tasks.Task.Run(() => process.Wait());
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => GetActiveWaiters(process) > 0,
+                TimeSpan.FromSeconds(1)));
 
-            var disposeTask = System.Threading.Tasks.Task.Run(process.Dispose, TestContext.Current.CancellationToken);
-            await disposeTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
-            await waitTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
-            Assert.False(process.IsRunning);
-        }
-        finally
-        {
-            process.Dispose();
-        }
+        var disposeTask = System.Threading.Tasks.Task.Run(process.Dispose, TestContext.Current.CancellationToken);
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => GetActiveProcessUsers(process) > 0,
+                TimeSpan.FromSeconds(1)));
+
+        await Task.WhenAll(
+            disposeTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken),
+            waitTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+
+        Assert.False(process.IsRunning);
+        Assert.Null(process.Pid);
     }
 
     [Fact]
     public async Task ProcessWaitAndRestartCanRunConcurrently()
     {
-        var process = CreateLongRunningProcess();
-        try
-        {
-            var firstPid = process.Start();
-            var waitTask = System.Threading.Tasks.Task.Run(() => process.Wait());
+        using var process = CreateLongRunningProcess();
+        var firstPid = process.Start();
+        var firstProcess = GetOwnedProcessInstance(process);
 
+        var waitTask = System.Threading.Tasks.Task.Run(() => process.Wait());
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => GetActiveWaiters(process) > 0,
+                TimeSpan.FromSeconds(1)));
+
+        var restartTask = System.Threading.Tasks.Task.Run(() => process.Restart());
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => GetActiveProcessUsers(process) > 0,
+                TimeSpan.FromSeconds(1)));
+
+        var secondPid = await restartTask.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+        var secondProcess = GetOwnedProcessInstance(process);
+
+        await waitTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+
+        Assert.NotEqual(firstPid, secondPid);
+        Assert.NotSame(firstProcess, secondProcess);
+        Assert.Equal(secondPid, process.Pid);
+        Assert.True(process.IsRunning);
+
+        process.Stop();
+    }
+
+    [Fact]
+    public async Task ProcessWaitAndStopRepeatedlyDoesNotDisposeProcessEarly()
+    {
+        using var process = CreateLongRunningProcess();
+
+        for (var iteration = 0; iteration < 12; iteration++)
+        {
+            process.Start();
+
+            var waitTask = System.Threading.Tasks.Task.Run(() => process.Wait());
             Assert.True(
                 SpinWait.SpinUntil(
                     () => GetActiveWaiters(process) > 0,
                     TimeSpan.FromSeconds(1)));
 
-            var restartTask = System.Threading.Tasks.Task.Run(() => process.Restart());
-            var secondPid = await restartTask.WaitAsync(
-                TimeSpan.FromSeconds(2),
-                TestContext.Current.CancellationToken);
+            var stopTask = System.Threading.Tasks.Task.Run(() => process.Stop());
+            Assert.True(
+                SpinWait.SpinUntil(
+                    () => GetActiveProcessUsers(process) > 0,
+                    TimeSpan.FromSeconds(1)));
 
-            Assert.NotEqual(firstPid, secondPid);
-            await waitTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
-            Assert.Equal(secondPid, process.Pid);
-        }
-        finally
-        {
-            process.Stop();
+            await Task.WhenAll(
+                stopTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken),
+                waitTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+
+            Assert.False(process.IsRunning);
+            Assert.Null(process.Pid);
         }
     }
 
@@ -784,6 +821,24 @@ public sealed class Tests
             BindingFlags.Instance | BindingFlags.NonPublic);
 
         return (int)field!.GetValue(process)!;
+    }
+
+    private static int GetActiveProcessUsers(OwnedProcess process)
+    {
+        var field = typeof(OwnedProcess).GetField(
+            "activeProcessUsers",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+
+        return (int)field!.GetValue(process)!;
+    }
+
+    private static Process GetOwnedProcessInstance(OwnedProcess process)
+    {
+        var field = typeof(OwnedProcess).GetField(
+            "process",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+
+        return (Process)field!.GetValue(process)!;
     }
 
     private static OwnedProcess CreateLongRunningProcess() =>

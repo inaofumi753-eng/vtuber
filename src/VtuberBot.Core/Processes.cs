@@ -35,6 +35,7 @@ public sealed class OwnedProcess : IDisposable
     private readonly ILogger logger;
     private Process? process;
     private int activeWaiters;
+    private int activeProcessUsers;
 
     public OwnedProcess(ProcessSpec spec, ILogger logger)
     {
@@ -150,8 +151,12 @@ public sealed class OwnedProcess : IDisposable
                 {
                     waitersIdle.Set();
 
-                    if (completed && ReferenceEquals(process, current))
+                    if (completed &&
+                        ReferenceEquals(process, current) &&
+                        activeProcessUsers == 0)
+                    {
                         ReleaseExitedProcess(current);
+                    }
                 }
             }
         }
@@ -195,6 +200,7 @@ public sealed class OwnedProcess : IDisposable
                 return null;
 
             current = process;
+            activeProcessUsers++;
 
             try
             {
@@ -216,55 +222,64 @@ public sealed class OwnedProcess : IDisposable
             }
             catch (InvalidOperationException exception)
             {
+                activeProcessUsers--;
                 throw new ProcessManagerException("Process lifecycle operation failed.", exception);
             }
         }
 
+        Exception? failure = null;
+        int? exitCode = alreadyExitedCode;
+
         try
         {
-            if (alreadyExitedCode is not null)
+            if (alreadyExitedCode is null)
             {
-                waitersIdle.Wait();
-
-                lock (gate)
+                var waitTimeout = timeout ?? TimeSpan.FromSeconds(5);
+                if (!current.WaitForExit(waitTimeout))
                 {
-                    if (ReferenceEquals(process, current) && activeWaiters == 0)
-                        ReleaseExitedProcess(current);
+                    try
+                    {
+                        current.Kill(entireProcessTree: false);
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // The process exited before the second kill.
+                    }
+
+                    current.WaitForExit();
                 }
 
-                return alreadyExitedCode.Value;
+                exitCode = current.ExitCode;
             }
-
-            var waitTimeout = timeout ?? TimeSpan.FromSeconds(5);
-            if (!current.WaitForExit(waitTimeout))
-            {
-                try
-                {
-                    current.Kill(entireProcessTree: false);
-                }
-                catch (InvalidOperationException)
-                {
-                    // The process exited before the second kill.
-                }
-
-                current.WaitForExit();
-            }
-
-            var exitCode = current.ExitCode;
-            waitersIdle.Wait();
-
-            lock (gate)
-            {
-                if (ReferenceEquals(process, current) && activeWaiters == 0)
-                    ReleaseExitedProcess(current);
-            }
-
-            return exitCode;
         }
         catch (InvalidOperationException exception)
         {
-            throw new ProcessManagerException("Process lifecycle operation failed.", exception);
+            failure = new ProcessManagerException("Process lifecycle operation failed.", exception);
         }
+        finally
+        {
+            lock (gate)
+            {
+                activeProcessUsers--;
+            }
+        }
+
+        waitersIdle.Wait();
+
+        lock (gate)
+        {
+            if (ReferenceEquals(process, current) &&
+                activeWaiters == 0 &&
+                activeProcessUsers == 0)
+            {
+                ReleaseExitedProcess(current);
+            }
+        }
+
+        if (failure is not null)
+            throw failure;
+
+        return exitCode;
     }
 
     private int ReleaseExitedProcess(Process current)
