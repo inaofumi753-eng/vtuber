@@ -513,7 +513,8 @@ public sealed class Tests
                 () =>
                 {
                     Assert.Throws<ProcessManagerException>(() => process.Start());
-                });
+                },
+                TestContext.Current.CancellationToken);
 
             await startTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
             process.Stop();

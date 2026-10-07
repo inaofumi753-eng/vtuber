@@ -76,27 +76,9 @@ public sealed class OwnedProcess : IDisposable
     {
         lock (lifecycleGate)
         {
-            Process? current;
-
-            lock (gate)
-            {
-                if (process is null)
-                    return StartLocked();
-
-                current = process;
-                if (!current.HasExited)
-                    throw new ProcessManagerException("Process already running.");
-            }
-
             waitersIdle.Wait();
-
             lock (gate)
-            {
-                if (ReferenceEquals(process, current) && activeWaiters == 0)
-                    ReleaseExitedProcess(current);
-
                 return StartLocked();
-            }
         }
     }
 
@@ -186,8 +168,7 @@ public sealed class OwnedProcess : IDisposable
 
     private int? StopLocked(TimeSpan? timeout)
     {
-        Process current;
-        int? alreadyExitedCode = null;
+        Process? current;
 
         lock (gate)
         {
@@ -200,18 +181,21 @@ public sealed class OwnedProcess : IDisposable
             {
                 if (current.HasExited)
                 {
-                    alreadyExitedCode = current.ExitCode;
+                    var exitCode = current.ExitCode;
+
+                    if (activeWaiters == 0)
+                        ReleaseExitedProcess(current);
+
+                    return exitCode;
                 }
-                else
+
+                try
                 {
-                    try
-                    {
-                        current.Kill(entireProcessTree: false);
-                    }
-                    catch (InvalidOperationException)
-                    {
-                        // The process exited between HasExited and Kill.
-                    }
+                    current.Kill(entireProcessTree: false);
+                }
+                catch (InvalidOperationException)
+                {
+                    // The process exited between HasExited and Kill.
                 }
             }
             catch (InvalidOperationException exception)
@@ -222,19 +206,6 @@ public sealed class OwnedProcess : IDisposable
 
         try
         {
-            if (alreadyExitedCode is not null)
-            {
-                waitersIdle.Wait();
-
-                lock (gate)
-                {
-                    if (ReferenceEquals(process, current) && activeWaiters == 0)
-                        ReleaseExitedProcess(current);
-                }
-
-                return alreadyExitedCode.Value;
-            }
-
             var waitTimeout = timeout ?? TimeSpan.FromSeconds(5);
             if (!current.WaitForExit(waitTimeout))
             {
