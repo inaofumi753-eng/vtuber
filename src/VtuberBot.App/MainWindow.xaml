@@ -1,0 +1,12 @@
+<Window x:Class="VtuberBot.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="{Binding Title}"
+        Width="420"
+        Height="190">
+    <StackPanel VerticalAlignment="Center">
+        <TextBlock Text="{Binding ApplicationName}" FontSize="22" HorizontalAlignment="Center"/>
+        <TextBlock Text="V0.1 C# Migration" HorizontalAlignment="Center"/>
+        <TextBlock Text="{Binding Status}" HorizontalAlignment="Center"/>
+    </StackPanel>
+</Window>

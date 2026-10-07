@@ -1,0 +1,1 @@
+namespace VtuberBot.Core; public enum AppState { Starting, Running, Stopping, Stopped, Error }

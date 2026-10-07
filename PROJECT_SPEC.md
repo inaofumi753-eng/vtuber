@@ -16,7 +16,7 @@ Central specification for the local-first Windows VTuber Bot. Target: Ryzen 5 56
 - Local users, profiles, statistics and history.
 - PNG/2.5D avatar with blinking, eyes, breathing, expressions, mouth and basic lip sync.
 - Local TTS, audio queue, emotional profiles and prerecorded reactions.
-- PySide6 desktop control panel.
+- WPF desktop control panel (current V0.1 migration target).
 - Telegram Web as an interface, not the system brain.
 - Transparent avatar window captured by OBS.
 - CPU/RAM/GPU monitoring and adaptive Ahorro/Equilibrado/Calidad profiles.
