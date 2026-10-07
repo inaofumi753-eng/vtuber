@@ -1,1 +1,142 @@
-namespace VtuberBot.Core;public sealed class VtuberApplication{public const string InternalTestEvent="internal.test";readonly string?cp;AppState state=AppState.Stopped;Logger?log;ResourceManager?rm;SqliteDatabase?db;EventManager?em;TaskScheduler?ts;AppConfig?cfg;int processed;public VtuberApplication(string?path=null)=>cp=path;public AppState State=>state;public AppConfig Config=>cfg??throw new InvalidOperationException();public SqliteDatabase Database=>db??throw new InvalidOperationException();public EventManager EventManager=>em??throw new InvalidOperationException();public TaskScheduler TaskScheduler=>ts??throw new InvalidOperationException();public ResourceManager ResourceManager=>rm??throw new InvalidOperationException();public int InternalTestEventsProcessed=>processed;public void Initialize(){if(state!=AppState.Stopped)throw new InvalidOperationException();state=AppState.Starting;try{cfg=AppConfig.Load(cp);log=new(cfg.LogDirectory,cfg.LogLevel);rm=new(log);rm.Register("logging",log.Dispose);db=new(cfg.DatabasePath);db.Open();rm.Register("database",db.Close);db.InitializeSchema();em=new(log);ts=new(log);rm.Register("scheduler",ts.Shutdown);em.Subscribe(InternalTestEvent,_=>{processed++;log.Info("Internal test event processed");});em.Emit(new(InternalTestEvent));state=AppState.Running;}catch(Exception e){state=AppState.Error;log?.Error(e,"Application initialization failed.");rm?.CleanupAll();throw new ApplicationException("Application initialization failed.",e);}}public void Shutdown(){if(state==AppState.Stopped)return;state=AppState.Stopping;try{rm?.CleanupAll();}finally{state=AppState.Stopped;db=null;em=null;ts=null;rm=null;cfg=null;log=null;}}}
+namespace VtuberBot.Core;
+
+public sealed class VtuberApplication
+{
+    public const string InternalTestEvent = "internal.test";
+    public const string CommandExecutedEvent = "command.executed";
+    public const string Version = "0.2.0";
+
+    private readonly string? configPath;
+    private AppState state = AppState.Stopped;
+    private Logger? logger;
+    private ResourceManager? resources;
+    private SqliteDatabase? database;
+    private EventManager? events;
+    private TaskScheduler? scheduler;
+    private AppConfig? config;
+    private CommandRouter? commandRouter;
+    private int processed;
+
+    public VtuberApplication(string? configPath = null) =>
+        this.configPath = configPath;
+
+    public AppState State => state;
+    public AppConfig Config => config ?? throw new InvalidOperationException();
+    public SqliteDatabase Database => database ?? throw new InvalidOperationException();
+    public EventManager EventManager => events ?? throw new InvalidOperationException();
+    public TaskScheduler TaskScheduler => scheduler ?? throw new InvalidOperationException();
+    public ResourceManager ResourceManager => resources ?? throw new InvalidOperationException();
+    public CommandRouter CommandRouter =>
+        commandRouter ?? throw new InvalidOperationException();
+    public int InternalTestEventsProcessed => processed;
+
+    public void Initialize()
+    {
+        if (state != AppState.Stopped)
+            throw new InvalidOperationException();
+
+        state = AppState.Starting;
+
+        try
+        {
+            config = AppConfig.Load(configPath);
+            logger = new(config.LogDirectory, config.LogLevel);
+            resources = new(logger);
+            resources.Register("logging", logger.Dispose);
+
+            database = new(config.DatabasePath);
+            database.Open();
+            resources.Register("database", database.Close);
+            database.InitializeSchema();
+
+            events = new(logger);
+            scheduler = new(logger);
+            resources.Register("scheduler", scheduler.Shutdown);
+
+            commandRouter = new(logger);
+            RegisterCommands();
+
+            events.Subscribe(InternalTestEvent, _ =>
+            {
+                processed++;
+                logger.Info("Internal test event processed");
+            });
+            events.Emit(new(InternalTestEvent));
+
+            state = AppState.Running;
+        }
+        catch (Exception exception)
+        {
+            state = AppState.Error;
+            logger?.Error(exception, "Application initialization failed.");
+            resources?.CleanupAll();
+            throw new ApplicationException("Application initialization failed.", exception);
+        }
+    }
+
+    public CommandResult ExecuteCommand(string input)
+    {
+        if (state != AppState.Running)
+            return CommandResult.Failed("Application is not running.");
+
+        var result = CommandRouter.Execute(input);
+
+        EventManager.Emit(new AppEvent(
+            CommandExecutedEvent,
+            new
+            {
+                Input = input,
+                result.Success,
+                result.Message
+            }));
+
+        return result;
+    }
+
+    public void Shutdown()
+    {
+        if (state == AppState.Stopped)
+            return;
+
+        state = AppState.Stopping;
+
+        try
+        {
+            resources?.CleanupAll();
+        }
+        finally
+        {
+            state = AppState.Stopped;
+            database = null;
+            events = null;
+            scheduler = null;
+            resources = null;
+            commandRouter = null;
+            config = null;
+            logger = null;
+        }
+    }
+
+    private void RegisterCommands()
+    {
+        var router = commandRouter!;
+
+        router.Register(new(
+            "help",
+            "List available commands.",
+            _ => CommandResult.Succeeded(router.GetHelpText())));
+
+        router.Register(new(
+            "ping",
+            "Check that the command core is responding.",
+            _ => CommandResult.Succeeded("pong")));
+
+        router.Register(new(
+            "status",
+            "Show the current application status.",
+            _ => CommandResult.Succeeded(
+                $"Name: {Config.Name}{Environment.NewLine}" +
+                $"Version: {Version}{Environment.NewLine}" +
+                $"State: {State}")));
+    }
+}
