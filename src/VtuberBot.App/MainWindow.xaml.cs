@@ -132,7 +132,7 @@ public sealed class Vm : INotifyPropertyChanged
     }
 
     public bool CanStart =>
-        application.State is AppState.Stopped or AppState.Error;
+        application.State == AppState.Stopped;
 
     public bool CanStop =>
         application.State != AppState.Stopped;
