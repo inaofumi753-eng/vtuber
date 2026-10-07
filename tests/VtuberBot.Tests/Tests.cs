@@ -471,6 +471,260 @@ public sealed class Tests
     }
 
     [Fact]
+    public void CommandRequestParsesSimpleWhitespaceArguments()
+    {
+        var request = CommandRequest.Parse("help foo bar");
+
+        Assert.Equal("help", request.Name);
+        Assert.Equal(["foo", "bar"], request.Arguments);
+    }
+
+    [Fact]
+    public void CommandRouterRegistersCommand()
+    {
+        var router = new CommandRouter(new TestLogger());
+        router.Register(new CommandDefinition(
+            "ping",
+            "Check the router.",
+            _ => CommandResult.Succeeded("pong")));
+
+        var result = router.Execute("ping");
+
+        Assert.True(result.Success);
+        Assert.Equal("pong", result.Message);
+    }
+
+    [Fact]
+    public void CommandRouterRejectsDuplicate()
+    {
+        var router = new CommandRouter(new TestLogger());
+        router.Register(new CommandDefinition(
+            "ping",
+            "Check the router.",
+            _ => CommandResult.Succeeded("pong")));
+
+        Assert.Throws<InvalidOperationException>(
+            () => router.Register(new CommandDefinition(
+                "PING",
+                "Duplicate.",
+                _ => CommandResult.Succeeded("duplicate"))));
+    }
+
+    [Fact]
+    public void CommandRouterUnknownCommandReturnsFailure()
+    {
+        var router = new CommandRouter(new TestLogger());
+
+        var result = router.Execute("missing");
+
+        Assert.False(result.Success);
+        Assert.Contains("Unknown command: missing", result.Message);
+    }
+
+    [Fact]
+    public void CommandRouterExecutesHandler()
+    {
+        var router = new CommandRouter(new TestLogger());
+        IReadOnlyList<string> received = [];
+
+        router.Register(new CommandDefinition(
+            "echo",
+            "Echo an argument.",
+            request =>
+            {
+                received = request.Arguments;
+                return CommandResult.Succeeded(request.Arguments[0]);
+            }));
+
+        var result = router.Execute("echo hello");
+
+        Assert.True(result.Success);
+        Assert.Equal("hello", result.Message);
+        Assert.Equal(["hello"], received);
+    }
+
+    [Fact]
+    public void CommandRouterReportsHandlerFailure()
+    {
+        var router = new CommandRouter(new TestLogger());
+        router.Register(new CommandDefinition(
+            "fail",
+            "Fail intentionally.",
+            _ => throw new InvalidOperationException("expected")));
+
+        var result = router.Execute("fail");
+
+        Assert.False(result.Success);
+        Assert.Contains("Command failed: expected", result.Message);
+    }
+
+    [Fact]
+    public void CommandRouterLookupIsCaseInsensitive()
+    {
+        var router = new CommandRouter(new TestLogger());
+        router.Register(new CommandDefinition(
+            "Ping",
+            "Check the router.",
+            _ => CommandResult.Succeeded("pong")));
+
+        var result = router.Execute("pInG");
+
+        Assert.True(result.Success);
+        Assert.Equal("pong", result.Message);
+    }
+
+    [Fact]
+    public void CommandRouterHelpOrderingIsDeterministic()
+    {
+        var router = new CommandRouter(new TestLogger());
+        router.Register(new CommandDefinition("status", "Status.", _ => CommandResult.Succeeded("status")));
+        router.Register(new CommandDefinition("help", "Help.", _ => CommandResult.Succeeded("help")));
+        router.Register(new CommandDefinition("ping", "Ping.", _ => CommandResult.Succeeded("ping")));
+
+        Assert.Equal(
+            "help — Help." + Environment.NewLine +
+            "ping — Ping." + Environment.NewLine +
+            "status — Status.",
+            router.GetHelpText());
+    }
+
+    [Fact]
+    public void CommandHelpWorks()
+    {
+        using var directory = new TempDirectory();
+        var configPath = directory.File("config.toml");
+        File.WriteAllText(configPath, "[database]\npath = \"a.db\"");
+
+        var application = new VtuberApplication(configPath);
+        application.Initialize();
+
+        try
+        {
+            var result = application.ExecuteCommand("help");
+
+            Assert.True(result.Success);
+            Assert.Contains("help — List available commands.", result.Message);
+            Assert.Contains("ping — Check that the command core is responding.", result.Message);
+            Assert.Contains("status — Show the current application status.", result.Message);
+        }
+        finally
+        {
+            application.Shutdown();
+        }
+    }
+
+    [Fact]
+    public void CommandStatusWorks()
+    {
+        using var directory = new TempDirectory();
+        var configPath = directory.File("config.toml");
+        File.WriteAllText(configPath, "[database]\npath = \"a.db\"");
+
+        var application = new VtuberApplication(configPath);
+        application.Initialize();
+
+        try
+        {
+            var result = application.ExecuteCommand("STATUS");
+
+            Assert.True(result.Success);
+            Assert.Contains("Name: VTuber Bot", result.Message);
+            Assert.Contains("Version: 0.2.0", result.Message);
+            Assert.Contains("State: Running", result.Message);
+        }
+        finally
+        {
+            application.Shutdown();
+        }
+    }
+
+    [Fact]
+    public void CommandPingWorks()
+    {
+        using var directory = new TempDirectory();
+        var configPath = directory.File("config.toml");
+        File.WriteAllText(configPath, "[database]\npath = \"a.db\"");
+
+        var application = new VtuberApplication(configPath);
+        application.Initialize();
+
+        try
+        {
+            var result = application.ExecuteCommand("ping");
+
+            Assert.True(result.Success);
+            Assert.Equal("pong", result.Message);
+        }
+        finally
+        {
+            application.Shutdown();
+        }
+    }
+
+    [Fact]
+    public void ApplicationCommandIntegrationEmitsExecutionEvent()
+    {
+        using var directory = new TempDirectory();
+        var configPath = directory.File("config.toml");
+        File.WriteAllText(configPath, "[database]\npath = \"a.db\"");
+
+        var application = new VtuberApplication(configPath);
+        application.Initialize();
+
+        try
+        {
+            var calls = 0;
+            AppEvent? received = null;
+            application.EventManager.Subscribe(
+                VtuberApplication.CommandExecutedEvent,
+                appEvent =>
+                {
+                    calls++;
+                    received = appEvent;
+                });
+
+            var result = application.ExecuteCommand("ping");
+
+            Assert.True(result.Success);
+            Assert.Equal(1, calls);
+            Assert.NotNull(received);
+            Assert.Equal(VtuberApplication.CommandExecutedEvent, received!.Name);
+        }
+        finally
+        {
+            application.Shutdown();
+        }
+    }
+
+    [Fact]
+    public void ApplicationCommandBeforeInitializeReturnsFailure()
+    {
+        using var application = new VtuberApplication();
+
+        var result = application.ExecuteCommand("ping");
+
+        Assert.False(result.Success);
+        Assert.Equal("Application is not running.", result.Message);
+    }
+
+    [Fact]
+    public void ApplicationCommandAfterShutdownReturnsFailure()
+    {
+        using var directory = new TempDirectory();
+        var configPath = directory.File("config.toml");
+        File.WriteAllText(configPath, "[database]\npath = \"a.db\"");
+
+        var application = new VtuberApplication(configPath);
+        application.Initialize();
+        application.Shutdown();
+
+        var result = application.ExecuteCommand("ping");
+
+        Assert.False(result.Success);
+        Assert.Equal("Application is not running.", result.Message);
+    }
+
+    [Fact]
     public async Task ProcessWaitAndStopCanRunConcurrently()
     {
         using var process = CreateLongRunningProcess();
