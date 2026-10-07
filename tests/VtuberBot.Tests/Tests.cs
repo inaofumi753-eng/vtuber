@@ -699,7 +699,7 @@ public sealed class Tests
     [Fact]
     public void ApplicationCommandBeforeInitializeReturnsFailure()
     {
-        using var application = new VtuberApplication();
+        var application = new VtuberApplication();
 
         var result = application.ExecuteCommand("ping");
 
