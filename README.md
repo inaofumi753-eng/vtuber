@@ -8,9 +8,13 @@ The approved migration target is **C# / .NET 10 / WPF / SQLite / Windows-first**
 
 The Python/PySide6 V0.1 remains temporarily as the functional reference. It has not been removed and is not used as a second runtime.
 
-The C# foundation contains configuration, logging, SQLite, lifecycle, EventManager, one-shot TaskScheduler, ResourceManager, owned process management, provider-neutral Voice/Avatar/Twitch/OBS contracts and a minimal WPF diagnostic panel.
+The C# foundation contains configuration, logging, SQLite, lifecycle, EventManager, one-shot TaskScheduler, ResourceManager, owned process management, provider-neutral Voice/Avatar/Twitch/OBS contracts and a minimal WPF control panel. V0.2.0 adds the local Command Core with `help`, `status` and `ping`, plus command execution and lifecycle controls in WPF.
 
-No Twitch, STT, TTS, VAD, LLM, avatar runtime, OBS integration, Telegram, AI or V0.2 functionality is activated.
+V0.2.0 is limited to the local Control Plane + Command Core. Twitch, STT, TTS, VAD, LLM, avatar runtime, OBS integration, Telegram, performance monitoring and V0.3 functionality are not activated.
+
+## V0.2.0 status
+
+V0.1 is closed. V0.2.0 is implemented on a dedicated branch and awaits GPT Cerebro review before merge.
 
 ## Build
 
