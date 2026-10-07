@@ -482,11 +482,19 @@ public sealed class Tests
                 () => GetActiveWaiters(process) > 0,
                 TimeSpan.FromSeconds(1)));
 
-        var stopTask = System.Threading.Tasks.Task.Run(() => process.Stop());
-        Assert.True(
-            SpinWait.SpinUntil(
-                () => GetActiveProcessUsers(process) > 0,
-                TimeSpan.FromSeconds(1)));
+        var stopStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var stopTask = System.Threading.Tasks.Task.Run(
+            () =>
+            {
+                stopStarted.SetResult();
+                return process.Stop();
+            },
+            TestContext.Current.CancellationToken);
+
+        await stopStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(1),
+            TestContext.Current.CancellationToken);
 
         await Task.WhenAll(
             stopTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken),
@@ -539,11 +547,19 @@ public sealed class Tests
                 () => GetActiveWaiters(process) > 0,
                 TimeSpan.FromSeconds(1)));
 
-        var disposeTask = System.Threading.Tasks.Task.Run(process.Dispose, TestContext.Current.CancellationToken);
-        Assert.True(
-            SpinWait.SpinUntil(
-                () => GetActiveProcessUsers(process) > 0,
-                TimeSpan.FromSeconds(1)));
+        var disposeStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var disposeTask = System.Threading.Tasks.Task.Run(
+            () =>
+            {
+                disposeStarted.SetResult();
+                process.Dispose();
+            },
+            TestContext.Current.CancellationToken);
+
+        await disposeStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(1),
+            TestContext.Current.CancellationToken);
 
         await Task.WhenAll(
             disposeTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken),
@@ -566,11 +582,19 @@ public sealed class Tests
                 () => GetActiveWaiters(process) > 0,
                 TimeSpan.FromSeconds(1)));
 
-        var restartTask = System.Threading.Tasks.Task.Run(() => process.Restart());
-        Assert.True(
-            SpinWait.SpinUntil(
-                () => GetActiveProcessUsers(process) > 0,
-                TimeSpan.FromSeconds(1)));
+        var restartStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var restartTask = System.Threading.Tasks.Task.Run(
+            () =>
+            {
+                restartStarted.SetResult();
+                return process.Restart();
+            },
+            TestContext.Current.CancellationToken);
+
+        await restartStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(1),
+            TestContext.Current.CancellationToken);
 
         var secondPid = await restartTask.WaitAsync(
             TimeSpan.FromSeconds(2),
@@ -602,11 +626,19 @@ public sealed class Tests
                     () => GetActiveWaiters(process) > 0,
                     TimeSpan.FromSeconds(1)));
 
-            var stopTask = System.Threading.Tasks.Task.Run(() => process.Stop());
-            Assert.True(
-                SpinWait.SpinUntil(
-                    () => GetActiveProcessUsers(process) > 0,
-                    TimeSpan.FromSeconds(1)));
+            var stopStarted = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var stopTask = System.Threading.Tasks.Task.Run(
+                () =>
+                {
+                    stopStarted.SetResult();
+                    return process.Stop();
+                },
+                TestContext.Current.CancellationToken);
+
+            await stopStarted.Task.WaitAsync(
+                TimeSpan.FromSeconds(1),
+                TestContext.Current.CancellationToken);
 
             await Task.WhenAll(
                 stopTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken),
@@ -818,15 +850,6 @@ public sealed class Tests
     {
         var field = typeof(OwnedProcess).GetField(
             "activeWaiters",
-            BindingFlags.Instance | BindingFlags.NonPublic);
-
-        return (int)field!.GetValue(process)!;
-    }
-
-    private static int GetActiveProcessUsers(OwnedProcess process)
-    {
-        var field = typeof(OwnedProcess).GetField(
-            "activeProcessUsers",
             BindingFlags.Instance | BindingFlags.NonPublic);
 
         return (int)field!.GetValue(process)!;
