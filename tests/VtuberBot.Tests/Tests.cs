@@ -181,16 +181,16 @@ public sealed class Tests
         database.Open();
         database.InitializeSchema();
 
-        Assert.Equal(1L, database.ExecuteScalar("PRAGMA foreign_keys"));
-        Assert.Equal(2L, database.ExecuteScalar("PRAGMA synchronous"));
-        Assert.Equal("wal", database.ExecuteScalar("PRAGMA journal_mode"));
+        Assert.Equal(1L, database.QueryScalar("PRAGMA foreign_keys"));
+        Assert.Equal(2L, database.QueryScalar("PRAGMA synchronous"));
+        Assert.Equal("wal", database.QueryScalar("PRAGMA journal_mode"));
         Assert.Equal(
             SqliteDatabase.SchemaVersion.ToString(),
-            database.ExecuteScalar("SELECT value FROM schema_meta WHERE key = 'schema_version'"));
+            database.QueryScalar("SELECT value FROM schema_meta WHERE key = 'schema_version'"));
     }
 
     [Fact]
-    public void DatabaseExecuteAndScalarUseParameters()
+    public void DatabaseExecuteAndQueryScalarUseParameters()
     {
         using var directory = new TempDirectory();
         using var database = new SqliteDatabase(directory.File("a.db"));
@@ -205,7 +205,7 @@ public sealed class Tests
 
         Assert.Equal(
             "hello",
-            database.ExecuteScalar(
+            database.QueryScalar(
                 "SELECT value FROM sample WHERE value = $value",
                 ("$value", "hello")));
     }
@@ -225,8 +225,8 @@ public sealed class Tests
         Assert.Throws<InvalidOperationException>(() => database.Execute("SELECT 1"));
 
         database.Open();
-        Assert.Equal(1L, database.ExecuteScalar("PRAGMA foreign_keys"));
-        Assert.Equal(2L, database.ExecuteScalar("PRAGMA synchronous"));
+        Assert.Equal(1L, database.QueryScalar("PRAGMA foreign_keys"));
+        Assert.Equal(2L, database.QueryScalar("PRAGMA synchronous"));
     }
 
     [Fact]
@@ -238,7 +238,7 @@ public sealed class Tests
         database.Open();
 
         Assert.Throws<SqliteException>(() => database.Execute("THIS IS NOT SQL"));
-        Assert.Equal(1L, database.ExecuteScalar("SELECT 1"));
+        Assert.Equal(1L, database.QueryScalar("SELECT 1"));
     }
 
     [Fact]
@@ -253,7 +253,7 @@ public sealed class Tests
 
         Assert.Equal(
             SqliteDatabase.SchemaVersion.ToString(),
-            database.ExecuteScalar("SELECT value FROM schema_meta WHERE key = 'schema_version'"));
+            database.QueryScalar("SELECT value FROM schema_meta WHERE key = 'schema_version'"));
     }
 
 
@@ -268,7 +268,7 @@ public sealed class Tests
 
         var tasks = Enumerable.Range(0, 24)
             .Select(_ => System.Threading.Tasks.Task.Run(
-                () => database.ExecuteScalar("SELECT 1"),
+                () => database.QueryScalar("SELECT 1"),
                 TestContext.Current.CancellationToken))
             .ToArray();
 
@@ -297,7 +297,7 @@ public sealed class Tests
 
         await System.Threading.Tasks.Task.WhenAll(tasks);
 
-        Assert.Equal(32L, database.ExecuteScalar("SELECT COUNT(*) FROM sample"));
+        Assert.Equal(32L, database.QueryScalar("SELECT COUNT(*) FROM sample"));
     }
 
     [Fact]
@@ -335,14 +335,14 @@ public sealed class Tests
             TimeSpan.FromSeconds(2),
             TestContext.Current.CancellationToken);
 
-        Assert.Equal(0L, database.ExecuteScalar("SELECT COUNT(*) FROM sample"));
+        Assert.Equal(0L, database.QueryScalar("SELECT COUNT(*) FROM sample"));
 
         release.TrySetResult(true);
         await writerTask.WaitAsync(
             TimeSpan.FromSeconds(2),
             TestContext.Current.CancellationToken);
 
-        Assert.Equal(1L, database.ExecuteScalar("SELECT COUNT(*) FROM sample"));
+        Assert.Equal(1L, database.QueryScalar("SELECT COUNT(*) FROM sample"));
     }
 
     [Fact]
@@ -401,7 +401,57 @@ public sealed class Tests
             firstWriter.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken),
             secondWriter.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
 
-        Assert.Equal(2L, database.ExecuteScalar("SELECT COUNT(*) FROM sample"));
+        Assert.Equal(2L, database.QueryScalar("SELECT COUNT(*) FROM sample"));
+    }
+
+    [Fact]
+    public async Task DatabaseWriterGateBlocksExecuteScalarWriteUntilFirstTransactionCompletes()
+    {
+        using var directory = new TempDirectory();
+        using var database = new SqliteDatabase(directory.File("a.db"));
+
+        database.Open();
+        database.InitializeSchema();
+        database.Execute("CREATE TABLE sample(value INTEGER NOT NULL)");
+
+        var firstEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var firstWriter = System.Threading.Tasks.Task.Run(
+            () =>
+                database.ExecuteTransaction((connection, transaction) =>
+                {
+                    firstEntered.TrySetResult(true);
+                    release.Task.GetAwaiter().GetResult();
+
+                    using var command = connection.CreateCommand();
+                    command.Transaction = transaction;
+                    command.CommandText = "INSERT INTO sample(value) VALUES (1)";
+                    command.ExecuteNonQuery();
+                }),
+            TestContext.Current.CancellationToken);
+
+        await firstEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+
+        var scalarWriter = System.Threading.Tasks.Task.Run(
+            () => database.ExecuteScalar(
+                "INSERT INTO sample(value) VALUES (2) RETURNING value"),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(scalarWriter.IsCompleted);
+
+        release.TrySetResult(true);
+
+        await System.Threading.Tasks.Task.WhenAll(
+            firstWriter.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken),
+            scalarWriter.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+
+        Assert.Equal(2L, scalarWriter.Result);
+        Assert.Equal(2L, database.QueryScalar("SELECT COUNT(*) FROM sample"));
     }
 
     [Fact]
@@ -430,7 +480,7 @@ public sealed class Tests
                 throw new InvalidOperationException("expected rollback");
             }));
 
-        Assert.Equal(0L, database.ExecuteScalar("SELECT COUNT(*) FROM sample"));
+        Assert.Equal(0L, database.QueryScalar("SELECT COUNT(*) FROM sample"));
     }
 
     [Fact]
@@ -467,7 +517,7 @@ public sealed class Tests
             TestContext.Current.CancellationToken);
 
         database.Close();
-        Assert.Throws<InvalidOperationException>(() => database.ExecuteScalar("SELECT 1"));
+        Assert.Throws<InvalidOperationException>(() => database.QueryScalar("SELECT 1"));
 
         release.TrySetResult(true);
         await transactionTask.WaitAsync(
@@ -475,7 +525,34 @@ public sealed class Tests
             TestContext.Current.CancellationToken);
 
         database.Open();
-        Assert.Equal(1L, database.ExecuteScalar("SELECT COUNT(*) FROM sample"));
+        Assert.Equal(1L, database.QueryScalar("SELECT COUNT(*) FROM sample"));
+    }
+
+    [Fact]
+    public async Task DatabaseCloseRejectsNewWriterWithoutWaiting()
+    {
+        using var directory = new TempDirectory();
+        using var database = new SqliteDatabase(directory.File("a.db"));
+
+        database.Open();
+        database.InitializeSchema();
+        database.Execute("CREATE TABLE sample(value INTEGER NOT NULL)");
+        database.Close();
+
+        var writerTask = System.Threading.Tasks.Task.Run(
+            () =>
+            {
+                database.Execute("INSERT INTO sample(value) VALUES (1)");
+                return true;
+            },
+            TestContext.Current.CancellationToken);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => writerTask.WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken));
+
+        Assert.Contains("not open", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -502,8 +579,71 @@ public sealed class Tests
             () => database.InitializeSchema());
 
         Assert.Contains("newer than supported", exception.Message);
-        Assert.Equal("99", database.ExecuteScalar(
+        Assert.Equal("99", database.QueryScalar(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"));
+    }
+
+    [Fact]
+    public async Task DatabaseCloseRechecksLifecycleAfterWaitingForWriterGate()
+    {
+        using var directory = new TempDirectory();
+        using var database = new SqliteDatabase(directory.File("a.db"));
+
+        database.Open();
+        database.InitializeSchema();
+        database.Execute("CREATE TABLE sample(value INTEGER NOT NULL)");
+
+        var firstEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondStarted = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var firstWriter = System.Threading.Tasks.Task.Run(
+            () =>
+                database.ExecuteTransaction((connection, transaction) =>
+                {
+                    firstEntered.TrySetResult(true);
+                    release.Task.GetAwaiter().GetResult();
+
+                    using var command = connection.CreateCommand();
+                    command.Transaction = transaction;
+                    command.CommandText = "INSERT INTO sample(value) VALUES (1)";
+                    command.ExecuteNonQuery();
+                }),
+            TestContext.Current.CancellationToken);
+
+        await firstEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+
+        var secondWriter = System.Threading.Tasks.Task.Run(
+            () =>
+            {
+                secondStarted.TrySetResult(true);
+                database.Execute("INSERT INTO sample(value) VALUES (2)");
+            },
+            TestContext.Current.CancellationToken);
+
+        await secondStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+        Assert.False(secondWriter.IsCompleted);
+
+        database.Close();
+        release.TrySetResult(true);
+
+        await firstWriter.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => secondWriter.WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken));
+
+        Assert.Contains("not open", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -527,12 +667,12 @@ public sealed class Tests
         database.Open();
 
         Assert.Throws<SqliteSchemaException>(() => database.InitializeSchema());
-        Assert.Equal("abc", database.ExecuteScalar(
+        Assert.Equal("abc", database.QueryScalar(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"));
     }
 
     [Fact]
-    public void DatabaseMigrationFailureRollsBackAndCanRecover()
+    public void DatabaseSchemaInitializationFailureRollsBackAndCanRecover()
     {
         using var directory = new TempDirectory();
         var path = directory.File("a.db");
@@ -554,7 +694,7 @@ public sealed class Tests
 
         Assert.Throws<SqliteException>(() => database.InitializeSchema());
 
-        Assert.Null(database.ExecuteScalar(
+        Assert.Null(database.QueryScalar(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"));
 
         database.Close();
@@ -573,7 +713,7 @@ public sealed class Tests
 
         Assert.Equal(
             SqliteDatabase.SchemaVersion.ToString(),
-            database.ExecuteScalar("SELECT value FROM schema_meta WHERE key = 'schema_version'"));
+            database.QueryScalar("SELECT value FROM schema_meta WHERE key = 'schema_version'"));
     }
 
     [Fact]
