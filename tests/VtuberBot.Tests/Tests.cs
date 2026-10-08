@@ -230,6 +230,29 @@ public sealed class Tests
     }
 
     [Fact]
+    public void DatabaseRepeatedOpenInitializeCloseCyclesAreStable()
+    {
+        using var directory = new TempDirectory();
+        using var database = new SqliteDatabase(directory.File("a.db"));
+
+        for (var cycle = 1; cycle <= 40; cycle++)
+        {
+            database.Open();
+            database.InitializeSchema();
+
+            Assert.Equal(
+                SqliteDatabase.SchemaVersion.ToString(),
+                database.QueryScalar(
+                    "SELECT value FROM schema_meta WHERE key = 'schema_version'"));
+
+            database.Close();
+
+            Assert.Throws<InvalidOperationException>(
+                () => database.QueryScalar("SELECT 1"));
+        }
+    }
+
+    [Fact]
     public void DatabaseSqlErrorDoesNotPoisonSubsequentOperations()
     {
         using var directory = new TempDirectory();
@@ -974,6 +997,46 @@ public sealed class Tests
     }
 
     [Fact]
+    public async Task TaskSchedulerCallbackCanShutdownWithoutDeadlock()
+    {
+        using var scheduler = new CoreTaskScheduler(new TestLogger());
+
+        var callbackEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbackReturned = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        scheduler.ScheduleOnce(
+            TimeSpan.Zero,
+            () =>
+            {
+                callbackEntered.TrySetResult(true);
+                scheduler.Shutdown();
+                callbackReturned.TrySetResult(true);
+            });
+
+        await callbackEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+
+        await callbackReturned.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+
+        Assert.Throws<InvalidOperationException>(
+            () => scheduler.ScheduleOnce(TimeSpan.Zero, () => { }));
+
+        var workerField = typeof(CoreTaskScheduler).GetField(
+            "worker",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+
+        Assert.True(
+            SpinWait.SpinUntil(
+                () => workerField?.GetValue(scheduler) is null,
+                TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
     public void ApplicationLifecycleAndDoubleShutdown()
     {
         using var directory = new TempDirectory();
@@ -990,6 +1053,31 @@ public sealed class Tests
         application.Shutdown();
 
         Assert.Equal(AppState.Stopped, application.State);
+    }
+
+    [Fact]
+    public void ApplicationRepeatedInitializeShutdownCyclesAreStable()
+    {
+        using var directory = new TempDirectory();
+        var configPath = directory.File("config.toml");
+        File.WriteAllText(configPath, "[database]\npath = \"a.db\"");
+
+        var application = new VtuberApplication(configPath);
+
+        for (var cycle = 1; cycle <= 20; cycle++)
+        {
+            application.Initialize();
+
+            Assert.Equal(AppState.Running, application.State);
+            Assert.Equal(cycle, application.InternalTestEventsProcessed);
+            Assert.True(application.PerformanceMonitor.IsRunning);
+
+            var monitor = application.PerformanceMonitor;
+            application.Shutdown();
+
+            Assert.Equal(AppState.Stopped, application.State);
+            Assert.False(monitor.IsRunning);
+        }
     }
 
     [Fact]
@@ -1225,6 +1313,84 @@ public sealed class Tests
         finally
         {
             application.Shutdown();
+        }
+    }
+
+    [Fact]
+    public async Task WpfExecutableSmokeStartsAndClosesCleanly()
+    {
+        var executablePath = GetWpfExecutablePath();
+        Assert.True(File.Exists(executablePath), $"WPF executable was not found: {executablePath}");
+
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = executablePath,
+                WorkingDirectory = Path.GetDirectoryName(executablePath)!,
+                UseShellExecute = false,
+                CreateNoWindow = false
+            }
+        };
+
+        Assert.True(process.Start());
+
+        try
+        {
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(15);
+            var token = TestContext.Current.CancellationToken;
+
+            while (DateTime.UtcNow < deadline)
+            {
+                if (process.HasExited)
+                    break;
+
+                process.Refresh();
+                if (process.MainWindowHandle != IntPtr.Zero)
+                    break;
+
+                await Task.Delay(TimeSpan.FromMilliseconds(100), token);
+            }
+
+            Assert.False(process.HasExited, "WPF executable exited before presenting its main window.");
+
+            process.Refresh();
+            Assert.NotEqual(
+                IntPtr.Zero,
+                process.MainWindowHandle);
+
+            Assert.True(process.CloseMainWindow());
+
+            await process.WaitForExitAsync(token).WaitAsync(
+                TimeSpan.FromSeconds(5),
+                token);
+
+            Assert.Equal(0, process.ExitCode);
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch (InvalidOperationException)
+                {
+                }
+
+                try
+                {
+                    await process.WaitForExitAsync(TestContext.Current.CancellationToken)
+                        .WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+                }
+                catch (TimeoutException)
+                {
+                }
+                catch (InvalidOperationException)
+                {
+                }
+            }
         }
     }
 
@@ -1883,6 +2049,47 @@ public sealed class Tests
     }
 
     [Fact]
+    public async Task PerformanceMonitorRepeatedStartStopCyclesAreStable()
+    {
+        var process = new SequenceProcessProbe(
+            Enumerable.Range(1, 20)
+                .Select(value => new ProcessPerformanceSample(
+                    TimeSpan.FromSeconds(value),
+                    100))
+                .ToArray());
+        var timers = new FakePeriodicTimerFactory();
+        using var monitor = CreateMonitor(process, timers: timers);
+
+        TaskCompletionSource<HealthSnapshot>? nextSnapshot = null;
+        monitor.SnapshotPublished += snapshot => nextSnapshot?.TrySetResult(snapshot);
+
+        for (var cycle = 1; cycle <= 20; cycle++)
+        {
+            nextSnapshot = new TaskCompletionSource<HealthSnapshot>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+
+            monitor.Start();
+
+            var snapshot = await nextSnapshot.Task.WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken);
+
+            Assert.NotNull(snapshot);
+            Assert.True(monitor.IsRunning);
+
+            monitor.Stop();
+
+            Assert.False(monitor.IsRunning);
+        }
+
+        nextSnapshot = null;
+
+        Assert.Equal(20, process.CallCount);
+        Assert.Equal(20, timers.Created.Count);
+        Assert.All(timers.Created, waiter => Assert.True(waiter.IsDisposed));
+    }
+
+    [Fact]
     public void ApplicationPerformanceProfileUsesRealPolicy()
     {
         using var directory = new TempDirectory();
@@ -2303,6 +2510,23 @@ public sealed class Tests
         Assert.True(backup.Length >= 1_000_000);
     }
 
+    private static string GetWpfExecutablePath()
+    {
+        var repositoryRoot = Directory.GetParent(AppContext.BaseDirectory)?.Parent?.Parent?.Parent?.Parent?.Parent?.FullName;
+
+        if (repositoryRoot is null)
+            throw new InvalidOperationException("Repository root could not be resolved.");
+
+        return Path.Combine(
+            repositoryRoot,
+            "src",
+            "VtuberBot.App",
+            "bin",
+            "Release",
+            "net10.0-windows",
+            "VtuberBot.App.exe");
+    }
+
     private static PerformanceMonitor CreateMonitor(
         IPerformanceProbe process,
         IGpuPerformanceProbe? gpu = null,
@@ -2410,6 +2634,15 @@ public sealed class Tests
         public FakePeriodicWaiter(TimeSpan period) => Period = period;
 
         public TimeSpan Period { get; set; }
+
+        public bool IsDisposed
+        {
+            get
+            {
+                lock (gate)
+                    return disposed;
+            }
+        }
 
         public async ValueTask<bool> WaitForNextTickAsync(CancellationToken cancellationToken)
         {
