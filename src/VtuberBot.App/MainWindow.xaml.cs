@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Input;
 using VtuberBot.Core;
+using CoreEventManager = VtuberBot.Core.EventManager;
 
 namespace VtuberBot.App;
 
@@ -262,7 +263,7 @@ public sealed class Vm : INotifyPropertyChanged
             Activity.RemoveAt(Activity.Count - 1);
     }
 
-    private EventManager? subscribedEvents;
+    private CoreEventManager? subscribedEvents;
     private Action<AppEvent>? healthHandler;
 
     private void OnHealthUpdated(AppEvent appEvent)
