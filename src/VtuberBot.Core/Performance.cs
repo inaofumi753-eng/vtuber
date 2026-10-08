@@ -209,6 +209,9 @@ public sealed class PerformanceMonitor : IDisposable
     private readonly IPeriodicWaiterFactory timerFactory;
     private readonly ILogger logger;
 
+    [ThreadStatic]
+    private static PerformanceMonitor? currentWorkerMonitor;
+
     private CancellationTokenSource? cancellation;
     private Task? worker;
     private HealthSnapshot? latestSnapshot;
@@ -216,6 +219,7 @@ public sealed class PerformanceMonitor : IDisposable
     private ProcessPerformanceSample? previousProcessSample;
     private DateTimeOffset? previousSampleTime;
     private bool disposed;
+    private bool processProbeDisposed;
 
     public PerformanceMonitor(
         IPerformanceProbe processProbe,
@@ -270,12 +274,15 @@ public sealed class PerformanceMonitor : IDisposable
         lock (gate)
         {
             ThrowIfDisposed();
+            _ = PerformancePolicy.GetSamplingInterval(newProfile);
             profile = newProfile;
         }
     }
 
     public void Start()
     {
+        TaskCompletionSource<bool> startSignal;
+
         lock (gate)
         {
             ThrowIfDisposed();
@@ -286,8 +293,11 @@ public sealed class PerformanceMonitor : IDisposable
             previousProcessSample = null;
             previousSampleTime = null;
             cancellation = new CancellationTokenSource();
-            worker = RunAsync(cancellation.Token);
+            startSignal = new();
+            worker = RunAsync(cancellation.Token, startSignal.Task);
         }
+
+        startSignal.TrySetResult(true);
     }
 
     public void Stop()
@@ -302,6 +312,9 @@ public sealed class PerformanceMonitor : IDisposable
 
             cancellation!.Cancel();
         }
+
+        if (ReferenceEquals(currentWorkerMonitor, this))
+            return;
 
         try
         {
@@ -330,6 +343,9 @@ public sealed class PerformanceMonitor : IDisposable
             cancellation?.Cancel();
         }
 
+        if (workerToWait is not null && ReferenceEquals(currentWorkerMonitor, this))
+            return;
+
         if (workerToWait is not null)
         {
             try
@@ -345,8 +361,7 @@ public sealed class PerformanceMonitor : IDisposable
             }
         }
 
-        if (processProbe is IDisposable disposableProbe)
-            disposableProbe.Dispose();
+        DisposeProcessProbe();
 
         lock (gate)
         {
@@ -356,16 +371,28 @@ public sealed class PerformanceMonitor : IDisposable
         }
     }
 
-    private async Task RunAsync(CancellationToken cancellationToken)
+    private async Task RunAsync(CancellationToken cancellationToken, Task startSignal)
     {
         try
         {
+            await startSignal.ConfigureAwait(false);
+
             using var timer = timerFactory.Create(Policy.SamplingInterval);
 
             while (!cancellationToken.IsCancellationRequested)
             {
-                PublishSample();
-                timer.Period = Policy.SamplingInterval;
+                var previousWorkerMonitor = currentWorkerMonitor;
+                currentWorkerMonitor = this;
+
+                try
+                {
+                    PublishSample();
+                    timer.Period = Policy.SamplingInterval;
+                }
+                finally
+                {
+                    currentWorkerMonitor = previousWorkerMonitor;
+                }
 
                 if (!await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
                     break;
@@ -380,6 +407,8 @@ public sealed class PerformanceMonitor : IDisposable
         }
         finally
         {
+            var disposeProbe = false;
+
             lock (gate)
             {
                 if (cancellation?.Token == cancellationToken)
@@ -387,8 +416,12 @@ public sealed class PerformanceMonitor : IDisposable
                     worker = null;
                     cancellation?.Dispose();
                     cancellation = null;
+                    disposeProbe = disposed;
                 }
             }
+
+            if (disposeProbe)
+                DisposeProcessProbe();
         }
     }
 
@@ -497,6 +530,20 @@ public sealed class PerformanceMonitor : IDisposable
 
         var percent = cpuSeconds / wallClockSeconds / processorCount * 100;
         return Math.Clamp(percent, 0, 100);
+    }
+
+    private void DisposeProcessProbe()
+    {
+        lock (gate)
+        {
+            if (processProbeDisposed)
+                return;
+
+            processProbeDisposed = true;
+        }
+
+        if (processProbe is IDisposable disposableProbe)
+            disposableProbe.Dispose();
     }
 
     private void ThrowIfDisposed()
