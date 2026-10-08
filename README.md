@@ -10,11 +10,11 @@ The Python/PySide6 V0.1 remains temporarily as the functional reference. It has 
 
 The C# foundation contains configuration, logging, SQLite, lifecycle, EventManager, one-shot TaskScheduler, ResourceManager, owned process management, provider-neutral Voice/Avatar/Twitch/OBS contracts and a minimal WPF control panel. V0.2.0 adds the local Command Core with `help`, `status` and `ping`, plus command execution and lifecycle controls in WPF.
 
-V0.2.0 is limited to the local Control Plane + Command Core. Twitch, STT, TTS, VAD, LLM, avatar runtime, OBS integration, Telegram, performance monitoring and V0.3 functionality are not activated.
+V0.2.0 is limited to the local Control Plane + Command Core. Twitch, STT, TTS, VAD, LLM, avatar runtime, OBS integration, Telegram and V0.3 functionality are not activated. V0.2.1 adds local performance and health monitoring.
 
 ## V0.2.0 status
 
-V0.1 and V0.2.0 are closed and integrated in `main`. V0.2.1 Performance + Health is currently under implementation on a dedicated branch.
+V0.1, V0.2.0 and V0.2.1 are closed and integrated in `main`. V0.2.2 SQLite Concurrency Hardening is currently under implementation.
 
 ## Build
 
