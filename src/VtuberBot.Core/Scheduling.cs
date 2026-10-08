@@ -5,6 +5,10 @@ public sealed class TaskScheduler : IDisposable
     private readonly object gate = new();
     private readonly List<(long Id, DateTimeOffset DueAt, Action Callback)> queue = [];
     private readonly ILogger logger;
+
+    [ThreadStatic]
+    private static TaskScheduler? currentWorkerScheduler;
+
     private CancellationTokenSource? cancellation;
     private Task? worker;
     private long nextId;
@@ -86,13 +90,23 @@ public sealed class TaskScheduler : IDisposable
                 queue.RemoveAt(0);
             }
 
+            var previousWorkerScheduler = currentWorkerScheduler;
+            currentWorkerScheduler = this;
+
             try
             {
-                next.Value.Callback();
+                try
+                {
+                    next.Value.Callback();
+                }
+                catch (Exception exception)
+                {
+                    logger.Error(exception, "Scheduled task {0} failed.", next.Value.Id);
+                }
             }
-            catch (Exception exception)
+            finally
             {
-                logger.Error(exception, "Scheduled task {0} failed.", next.Value.Id);
+                currentWorkerScheduler = previousWorkerScheduler;
             }
         }
     }
@@ -112,7 +126,8 @@ public sealed class TaskScheduler : IDisposable
             workerToWait = worker;
         }
 
-        if (workerToWait is not null)
+        if (workerToWait is not null &&
+            !ReferenceEquals(currentWorkerScheduler, this))
         {
             try
             {
@@ -123,12 +138,21 @@ public sealed class TaskScheduler : IDisposable
                 logger.Error(exception, "Task scheduler worker failed during shutdown.");
             }
         }
-
-        lock (gate)
+        finally
         {
-            worker = null;
-            cancellation?.Dispose();
-            cancellation = null;
+            CancellationTokenSource? cancellationToDispose = null;
+
+            lock (gate)
+            {
+                if (cancellation?.Token == token)
+                {
+                    worker = null;
+                    cancellationToDispose = cancellation;
+                    cancellation = null;
+                }
+            }
+
+            cancellationToDispose?.Dispose();
         }
     }
 
