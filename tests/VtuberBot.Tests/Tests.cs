@@ -1156,7 +1156,7 @@ public sealed class Tests
             callbackReturned.TrySetResult(true);
         };
 
-        var startTask = System.Threading.Tasks.Task.Run(() => monitor.Start());
+        var startTask = System.Threading.Tasks.Task.Run(() => monitor.Start(), TestContext.Current.CancellationToken);
 
         await callbackEntered.Task.WaitAsync(
             TimeSpan.FromSeconds(2),
