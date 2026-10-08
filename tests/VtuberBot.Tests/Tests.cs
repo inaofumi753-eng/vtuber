@@ -446,11 +446,15 @@ public sealed class Tests
 
         release.TrySetResult(true);
 
-        await System.Threading.Tasks.Task.WhenAll(
-            firstWriter.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken),
-            scalarWriter.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+        await firstWriter.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
 
-        Assert.Equal(2L, scalarWriter.Result);
+        var scalarResult = await scalarWriter.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(2L, scalarResult);
         Assert.Equal(2L, database.QueryScalar("SELECT COUNT(*) FROM sample"));
     }
 
