@@ -629,7 +629,7 @@ public sealed class Tests
 
             Assert.True(result.Success);
             Assert.Contains("Name: VTuber Bot", result.Message);
-            Assert.Contains("Version: 0.2.0", result.Message);
+            Assert.Contains("Version: 0.2.1", result.Message);
             Assert.Contains("State: Running", result.Message);
         }
         finally
@@ -722,6 +722,642 @@ public sealed class Tests
 
         Assert.False(result.Success);
         Assert.Equal("Application is not running.", result.Message);
+    }
+
+    [Fact]
+    public void PerformanceProfilesUseExpectedIntervals()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(5), PerformancePolicy.GetSamplingInterval(PerformanceProfile.Ahorro));
+        Assert.Equal(TimeSpan.FromSeconds(2), PerformancePolicy.GetSamplingInterval(PerformanceProfile.Equilibrado));
+        Assert.Equal(TimeSpan.FromSeconds(1), PerformancePolicy.GetSamplingInterval(PerformanceProfile.Calidad));
+    }
+
+    [Fact]
+    public void PerformancePolicyRejectsInvalidProfile()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => PerformancePolicy.GetSamplingInterval((PerformanceProfile)99));
+    }
+
+    [Fact]
+    public async Task MonitorRejectsInvalidProfileAndRetainsPreviousPolicy()
+    {
+        var clock = new FakeHealthClock(DateTimeOffset.UnixEpoch);
+        var timers = new FakePeriodicTimerFactory();
+        var process = new SequenceProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(1), 100),
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(2), 110));
+        using var monitor = CreateMonitor(process, clock: clock, timers: timers);
+
+        monitor.SetProfile(PerformanceProfile.Ahorro);
+        var previousPolicy = monitor.Policy;
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => monitor.SetProfile((PerformanceProfile)99));
+
+        Assert.Equal(PerformanceProfile.Ahorro, monitor.Profile);
+        Assert.Equal(previousPolicy, monitor.Policy);
+
+        var secondSnapshot = new TaskCompletionSource<HealthSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        monitor.SnapshotPublished += snapshot =>
+        {
+            if (snapshot.Timestamp > DateTimeOffset.UnixEpoch)
+                secondSnapshot.TrySetResult(snapshot);
+        };
+
+        monitor.Start();
+        clock.Advance(TimeSpan.FromSeconds(5));
+        timers.Last.Signal();
+
+        var snapshot = await secondSnapshot.Task.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(PerformanceProfile.Ahorro, snapshot.Profile);
+        Assert.Equal(TimeSpan.FromSeconds(5), timers.Last.Period);
+    }
+
+    [Fact]
+    public void HealthSnapshotCopiesIssues()
+    {
+        var issues = new List<HealthIssue> { new("GPU", "Unavailable", Optional: true) };
+        var snapshot = new HealthSnapshot(
+            DateTimeOffset.UtcNow,
+            null,
+            123,
+            null,
+            null,
+            PerformanceProfile.Equilibrado,
+            HealthState.DEGRADED,
+            issues);
+
+        issues.Clear();
+
+        Assert.Single(snapshot.Issues);
+        Assert.True(snapshot.Issues[0].Optional);
+    }
+
+    [Fact]
+    public void CpuCalculationIsDeterministic()
+    {
+        var previous = new ProcessPerformanceSample(TimeSpan.FromSeconds(10), 100);
+        var current = new ProcessPerformanceSample(TimeSpan.FromSeconds(11), 120);
+
+        var result = PerformanceMonitor.CalculateCpuPercent(
+            previous,
+            current,
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch.AddSeconds(2),
+            processorCount: 4);
+
+        Assert.Equal(12.5, result);
+    }
+
+    [Fact]
+    public void CpuCalculationReturnsNullForInvalidElapsedTime()
+    {
+        var sample = new ProcessPerformanceSample(TimeSpan.FromSeconds(10), 100);
+
+        Assert.Null(
+            PerformanceMonitor.CalculateCpuPercent(
+                sample,
+                sample,
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch,
+                processorCount: 4));
+    }
+
+    [Fact]
+    public void CpuCalculationReturnsNullForNegativeCpuDelta()
+    {
+        var previous = new ProcessPerformanceSample(TimeSpan.FromSeconds(11), 100);
+        var current = new ProcessPerformanceSample(TimeSpan.FromSeconds(10), 100);
+
+        Assert.Null(
+            PerformanceMonitor.CalculateCpuPercent(
+                previous,
+                current,
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch.AddSeconds(2),
+                processorCount: 4));
+    }
+
+    [Fact]
+    public void CpuCalculationRejectsNonPositiveProcessorCount()
+    {
+        var sample = new ProcessPerformanceSample(TimeSpan.FromSeconds(10), 100);
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => PerformanceMonitor.CalculateCpuPercent(
+                sample,
+                sample,
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch.AddSeconds(1),
+                processorCount: 0));
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => PerformanceMonitor.CalculateCpuPercent(
+                sample,
+                sample,
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch.AddSeconds(1),
+                processorCount: -1));
+    }
+
+    [Fact]
+    public void CpuCalculationClampsUpperBound()
+    {
+        var previous = new ProcessPerformanceSample(TimeSpan.Zero, 100);
+        var current = new ProcessPerformanceSample(TimeSpan.FromSeconds(20), 100);
+
+        var result = PerformanceMonitor.CalculateCpuPercent(
+            previous,
+            current,
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch.AddSeconds(2),
+            processorCount: 1);
+
+        Assert.Equal(100, result);
+    }
+
+    [Fact]
+    public void CpuCalculationReachesLowerBoundAtZero()
+    {
+        var sample = new ProcessPerformanceSample(TimeSpan.FromSeconds(10), 100);
+
+        var result = PerformanceMonitor.CalculateCpuPercent(
+            sample,
+            sample,
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch.AddSeconds(2),
+            processorCount: 4);
+
+        Assert.Equal(0, result);
+    }
+
+    [Fact]
+    public void CurrentProcessProbeRefreshesBeforeReading()
+    {
+        using var reader = new FakeProcessPerformanceReader(
+            TimeSpan.FromSeconds(4),
+            456_789_123);
+        using var probe = new CurrentProcessPerformanceProbe(reader);
+
+        var sample = probe.Sample();
+
+        Assert.Equal(1, reader.RefreshCount);
+        Assert.Equal(TimeSpan.FromSeconds(4), sample.TotalProcessorTime);
+        Assert.Equal(456_789_123, sample.WorkingSetBytes);
+    }
+
+    [Fact]
+    public void MonitorDoesNotSampleBeforeStart()
+    {
+        var process = new SequenceProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(1), 100));
+        using var monitor = CreateMonitor(process);
+
+        Assert.False(monitor.IsRunning);
+        Assert.Equal(0, process.CallCount);
+        Assert.Null(monitor.LatestSnapshot);
+    }
+
+    [Fact]
+    public void MonitorFirstSampleHasRamAndNoCpu()
+    {
+        var process = new SequenceProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(1), 100));
+        using var monitor = CreateMonitor(process);
+
+        HealthSnapshot? snapshot = null;
+        monitor.SnapshotPublished += value => snapshot = value;
+
+        monitor.Start();
+
+        Assert.True(monitor.IsRunning);
+        Assert.NotNull(snapshot);
+        Assert.Null(snapshot!.CpuPercent);
+        Assert.Equal(100, snapshot.WorkingSetBytes);
+        Assert.Equal(HealthState.OK, snapshot.Health);
+    }
+
+    [Fact]
+    public async Task MonitorSecondSampleCalculatesCpu()
+    {
+        var clock = new FakeHealthClock(DateTimeOffset.UnixEpoch);
+        var timers = new FakePeriodicTimerFactory();
+        var process = new SequenceProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(10), 100),
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(11), 120));
+        using var monitor = CreateMonitor(process, clock: clock, timers: timers);
+
+        var secondSnapshot = new TaskCompletionSource<HealthSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var count = 0;
+        monitor.SnapshotPublished += snapshot =>
+        {
+            if (++count == 2)
+                secondSnapshot.TrySetResult(snapshot);
+        };
+
+        monitor.Start();
+
+        clock.Advance(TimeSpan.FromSeconds(2));
+        timers.Last.Signal();
+
+        var snapshot = await secondSnapshot.Task.WaitAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(120, snapshot.WorkingSetBytes);
+        Assert.Equal(12.5, snapshot.CpuPercent);
+    }
+
+    [Fact]
+    public async Task MonitorProfileChangesPolicyAndSnapshot()
+    {
+        var clock = new FakeHealthClock(DateTimeOffset.UnixEpoch);
+        var timers = new FakePeriodicTimerFactory();
+        var process = new SequenceProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(1), 100),
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(2), 110));
+        using var monitor = CreateMonitor(process, clock: clock, timers: timers);
+
+        var secondSnapshot = new TaskCompletionSource<HealthSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        monitor.SnapshotPublished += snapshot =>
+        {
+            if (snapshot.Timestamp > DateTimeOffset.UnixEpoch)
+                secondSnapshot.TrySetResult(snapshot);
+        };
+
+        monitor.Start();
+        monitor.SetProfile(PerformanceProfile.Ahorro);
+
+        Assert.Equal(PerformanceProfile.Ahorro, monitor.Profile);
+        Assert.Equal(TimeSpan.FromSeconds(5), monitor.Policy.SamplingInterval);
+
+        clock.Advance(TimeSpan.FromSeconds(5));
+        timers.Last.Signal();
+
+        var snapshot = await secondSnapshot.Task.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(PerformanceProfile.Ahorro, snapshot.Profile);
+        Assert.Equal(TimeSpan.FromSeconds(5), timers.Last.Period);
+    }
+
+    [Fact]
+    public void MonitorStopStopsWorker()
+    {
+        var process = new SequenceProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(1), 100));
+        using var monitor = CreateMonitor(process);
+
+        monitor.Start();
+        monitor.Stop();
+
+        Assert.False(monitor.IsRunning);
+        var calls = process.CallCount;
+        Assert.Equal(calls, process.CallCount);
+    }
+
+    [Fact]
+    public void MonitorRestartCreatesFreshCycle()
+    {
+        var process = new SequenceProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(1), 100),
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(2), 200));
+        var timers = new FakePeriodicTimerFactory();
+        using var monitor = CreateMonitor(process, timers: timers);
+
+        var snapshots = new List<HealthSnapshot>();
+        monitor.SnapshotPublished += snapshots.Add;
+
+        monitor.Start();
+        monitor.Stop();
+        monitor.Start();
+
+        Assert.Equal(2, process.CallCount);
+        Assert.Equal(2, snapshots.Count);
+        Assert.Null(snapshots[0].CpuPercent);
+        Assert.Null(snapshots[1].CpuPercent);
+        Assert.Equal(2, timers.Created.Count);
+    }
+
+    [Fact]
+    public async Task MonitorRequiredProbeFailurePublishesUnavailableAndContinues()
+    {
+        var clock = new FakeHealthClock(DateTimeOffset.UnixEpoch);
+        var timers = new FakePeriodicTimerFactory();
+        var process = new FailFirstProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(1), 100));
+        using var monitor = CreateMonitor(process, clock: clock, timers: timers);
+
+        var snapshots = new List<HealthSnapshot>();
+        var secondSnapshot = new TaskCompletionSource<HealthSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        monitor.SnapshotPublished += snapshot =>
+        {
+            snapshots.Add(snapshot);
+            if (snapshots.Count == 2)
+                secondSnapshot.TrySetResult(snapshot);
+        };
+
+        monitor.Start();
+
+        Assert.Equal(HealthState.UNAVAILABLE, snapshots[0].Health);
+        Assert.Contains(snapshots[0].Issues, issue => issue.Source == "CPU/RAM");
+
+        clock.Advance(TimeSpan.FromSeconds(2));
+        timers.Last.Signal();
+
+        var recovered = await secondSnapshot.Task.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(HealthState.OK, recovered.Health);
+        Assert.Equal(100, recovered.WorkingSetBytes);
+    }
+
+    [Fact]
+    public void MonitorGpuFailureProducesDegradedHealth()
+    {
+        var process = new SequenceProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(1), 100));
+        var gpu = new DelegateGpuProbe(
+            () => throw new InvalidOperationException("gpu unavailable"));
+        using var monitor = CreateMonitor(process, gpu: gpu);
+
+        HealthSnapshot? snapshot = null;
+        monitor.SnapshotPublished += value => snapshot = value;
+
+        monitor.Start();
+
+        Assert.Equal(HealthState.DEGRADED, snapshot!.Health);
+        Assert.Contains(snapshot.Issues, issue => issue.Source == "GPU");
+    }
+
+    [Fact]
+    public void MonitorFpsFailureProducesDegradedHealth()
+    {
+        var process = new SequenceProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(1), 100));
+        var fps = new DelegateFpsSource(
+            () => throw new InvalidOperationException("fps unavailable"));
+        using var monitor = CreateMonitor(process, fps: fps);
+
+        HealthSnapshot? snapshot = null;
+        monitor.SnapshotPublished += value => snapshot = value;
+
+        monitor.Start();
+
+        Assert.Equal(HealthState.DEGRADED, snapshot!.Health);
+        Assert.Contains(snapshot.Issues, issue => issue.Source == "FPS");
+    }
+
+    [Fact]
+    public async Task MonitorListenerFailureDoesNotStopTheMonitor()
+    {
+        var clock = new FakeHealthClock(DateTimeOffset.UnixEpoch);
+        var timers = new FakePeriodicTimerFactory();
+        var process = new SequenceProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(1), 100),
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(2), 100));
+        using var monitor = CreateMonitor(process, clock: clock, timers: timers);
+
+        var secondSnapshot = new TaskCompletionSource<HealthSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        monitor.SnapshotPublished += _ => throw new InvalidOperationException("listener failed");
+        var count = 0;
+        monitor.SnapshotPublished += snapshot =>
+        {
+            if (++count == 2)
+                secondSnapshot.TrySetResult(snapshot);
+        };
+
+        monitor.Start();
+        Assert.True(monitor.IsRunning);
+
+        clock.Advance(TimeSpan.FromSeconds(2));
+        timers.Last.Signal();
+
+        _ = await secondSnapshot.Task.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.True(monitor.IsRunning);
+    }
+
+    [Fact]
+    public async Task MonitorSnapshotCallbackCanStopMonitorWithoutDeadlock()
+    {
+        var process = new SequenceProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(1), 100));
+        using var monitor = CreateMonitor(process);
+
+        var callbackEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbackReturned = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        monitor.SnapshotPublished += _ =>
+        {
+            callbackEntered.TrySetResult(true);
+            monitor.Stop();
+            callbackReturned.TrySetResult(true);
+        };
+
+        var startTask = System.Threading.Tasks.Task.Run(() => monitor.Start(), TestContext.Current.CancellationToken);
+
+        await callbackEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+        await callbackReturned.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+        await startTask.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(monitor.IsRunning);
+    }
+
+    [Fact]
+    public async Task MonitorSnapshotCallbackCanDisposeMonitorWithoutDeadlock()
+    {
+        var process = new SequenceProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(1), 100));
+        using var monitor = CreateMonitor(process);
+
+        var callbackEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbackReturned = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        monitor.SnapshotPublished += _ =>
+        {
+            callbackEntered.TrySetResult(true);
+            monitor.Dispose();
+            callbackReturned.TrySetResult(true);
+        };
+
+        var startTask = System.Threading.Tasks.Task.Run(() => monitor.Start(), TestContext.Current.CancellationToken);
+
+        await callbackEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+        await callbackReturned.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+        await startTask.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(monitor.IsRunning);
+        Assert.Throws<ObjectDisposedException>(
+            () => monitor.SetProfile(PerformanceProfile.Calidad));
+    }
+
+    [Fact]
+    public async Task ApplicationShutdownFromHealthEventDoesNotDeadlock()
+    {
+        using var directory = new TempDirectory();
+        var configPath = directory.File("config.toml");
+        File.WriteAllText(configPath, "[database]\npath = \"a.db\"");
+
+        var application = new VtuberApplication(configPath);
+        application.Initialize();
+        var monitor = application.PerformanceMonitor;
+
+        var callbackEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbackReturned = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        application.EventManager.Subscribe(
+            VtuberApplication.HealthUpdatedEvent,
+            _ =>
+            {
+                callbackEntered.TrySetResult(true);
+                application.Shutdown();
+                callbackReturned.TrySetResult(true);
+            });
+
+        application.SetPerformanceProfile(PerformanceProfile.Calidad);
+
+        await callbackEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+        await callbackReturned.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        monitor.Stop();
+
+        Assert.Equal(AppState.Stopped, application.State);
+        Assert.False(monitor.IsRunning);
+        Assert.Null(application.LatestHealth);
+    }
+
+    [Fact]
+    public void ApplicationIntegratesPerformanceMonitor()
+    {
+        using var directory = new TempDirectory();
+        var configPath = directory.File("config.toml");
+        File.WriteAllText(configPath, "[database]\npath = \"a.db\"");
+
+        var application = new VtuberApplication(configPath);
+        application.Initialize();
+
+        try
+        {
+            Assert.Equal(AppState.Running, application.State);
+            Assert.True(application.PerformanceMonitor.IsRunning);
+            Assert.NotNull(application.LatestHealth);
+            Assert.Equal(PerformanceProfile.Equilibrado, application.PerformanceProfile);
+            Assert.Equal("0.2.1", VtuberApplication.Version);
+        }
+        finally
+        {
+            application.Shutdown();
+        }
+    }
+
+    [Fact]
+    public void ApplicationShutdownStopsPerformanceMonitor()
+    {
+        using var directory = new TempDirectory();
+        var configPath = directory.File("config.toml");
+        File.WriteAllText(configPath, "[database]\npath = \"a.db\"");
+
+        var application = new VtuberApplication(configPath);
+        application.Initialize();
+        var monitor = application.PerformanceMonitor;
+
+        application.Shutdown();
+
+        Assert.False(monitor.IsRunning);
+        Assert.Null(application.LatestHealth);
+    }
+
+    [Fact]
+    public void ApplicationRestartCreatesFreshPerformanceMonitor()
+    {
+        using var directory = new TempDirectory();
+        var configPath = directory.File("config.toml");
+        File.WriteAllText(configPath, "[database]\npath = \"a.db\"");
+
+        var application = new VtuberApplication(configPath);
+        application.Initialize();
+        var first = application.PerformanceMonitor;
+
+        application.Shutdown();
+        application.Initialize();
+
+        try
+        {
+            Assert.NotSame(first, application.PerformanceMonitor);
+            Assert.True(application.PerformanceMonitor.IsRunning);
+            Assert.NotNull(application.LatestHealth);
+        }
+        finally
+        {
+            application.Shutdown();
+        }
+    }
+
+    [Fact]
+    public void ApplicationPerformanceProfileUsesRealPolicy()
+    {
+        using var directory = new TempDirectory();
+        var configPath = directory.File("config.toml");
+        File.WriteAllText(configPath, "[database]\npath = \"a.db\"");
+
+        var application = new VtuberApplication(configPath);
+        application.Initialize();
+
+        try
+        {
+            application.SetPerformanceProfile(PerformanceProfile.Calidad);
+
+            Assert.Equal(PerformanceProfile.Calidad, application.PerformanceProfile);
+            Assert.Equal(TimeSpan.FromSeconds(1), application.PerformanceMonitor.Policy.SamplingInterval);
+        }
+        finally
+        {
+            application.Shutdown();
+        }
+    }
+
+    [Fact]
+    public void ApplicationStaysRunningWithoutGpuProvider()
+    {
+        using var directory = new TempDirectory();
+        var configPath = directory.File("config.toml");
+        File.WriteAllText(configPath, "[database]\npath = \"a.db\"");
+
+        var application = new VtuberApplication(configPath);
+        application.Initialize();
+
+        try
+        {
+            Assert.Equal(AppState.Running, application.State);
+            Assert.NotNull(application.LatestHealth);
+            Assert.Null(application.LatestHealth!.Gpu);
+        }
+        finally
+        {
+            application.Shutdown();
+        }
     }
 
     [Fact]
@@ -1098,6 +1734,197 @@ public sealed class Tests
         Assert.True(active.Exists);
         Assert.True(backup.Exists);
         Assert.True(backup.Length >= 1_000_000);
+    }
+
+    private static PerformanceMonitor CreateMonitor(
+        IPerformanceProbe process,
+        IGpuPerformanceProbe? gpu = null,
+        IFpsSource? fps = null,
+        FakeHealthClock? clock = null,
+        FakePeriodicTimerFactory? timers = null)
+    {
+        return new PerformanceMonitor(
+            process,
+            gpu ?? new NullGpuPerformanceProbe(),
+            fps ?? new NullFpsSource(),
+            clock ?? new FakeHealthClock(DateTimeOffset.UnixEpoch),
+            timers ?? new FakePeriodicTimerFactory(),
+            new TestLogger());
+    }
+
+    private sealed class SequenceProcessProbe : IPerformanceProbe
+    {
+        private readonly Queue<ProcessPerformanceSample> samples;
+
+        public SequenceProcessProbe(params ProcessPerformanceSample[] samples) =>
+            this.samples = new Queue<ProcessPerformanceSample>(samples);
+
+        public int CallCount { get; private set; }
+
+        public ProcessPerformanceSample Sample()
+        {
+            CallCount++;
+            if (samples.Count == 0)
+                throw new InvalidOperationException("No more process samples.");
+            return samples.Dequeue();
+        }
+    }
+
+    private sealed class FailFirstProcessProbe : IPerformanceProbe
+    {
+        private readonly ProcessPerformanceSample recoverySample;
+        private bool failed = true;
+
+        public FailFirstProcessProbe(ProcessPerformanceSample recoverySample) =>
+            this.recoverySample = recoverySample;
+
+        public ProcessPerformanceSample Sample()
+        {
+            if (failed)
+            {
+                failed = false;
+                throw new InvalidOperationException("process unavailable");
+            }
+
+            return recoverySample;
+        }
+    }
+
+    private sealed class DelegateGpuProbe : IGpuPerformanceProbe
+    {
+        private readonly Func<GpuPerformanceSample?> sample;
+
+        public DelegateGpuProbe(Func<GpuPerformanceSample?> sample) =>
+            this.sample = sample;
+
+        public GpuPerformanceSample? Sample() => sample();
+    }
+
+    private sealed class DelegateFpsSource : IFpsSource
+    {
+        private readonly Func<double?> sample;
+
+        public DelegateFpsSource(Func<double?> sample) =>
+            this.sample = sample;
+
+        public double? Sample() => sample();
+    }
+
+    private sealed class FakeHealthClock : IHealthClock
+    {
+        public FakeHealthClock(DateTimeOffset current) => UtcNow = current;
+
+        public DateTimeOffset UtcNow { get; private set; }
+
+        public void Advance(TimeSpan amount) => UtcNow += amount;
+    }
+
+    private sealed class FakePeriodicTimerFactory : IPeriodicWaiterFactory
+    {
+        public List<FakePeriodicWaiter> Created { get; } = [];
+
+        public FakePeriodicWaiter Last =>
+            Created[^1];
+
+        public IPeriodicWaiter Create(TimeSpan interval)
+        {
+            var waiter = new FakePeriodicWaiter(interval);
+            Created.Add(waiter);
+            return waiter;
+        }
+    }
+
+    private sealed class FakePeriodicWaiter : IPeriodicWaiter
+    {
+        private readonly object gate = new();
+        private TaskCompletionSource<bool> next = CreateSource();
+        private bool disposed;
+
+        public FakePeriodicWaiter(TimeSpan period) => Period = period;
+
+        public TimeSpan Period { get; set; }
+
+        public async ValueTask<bool> WaitForNextTickAsync(CancellationToken cancellationToken)
+        {
+            Task<bool> task;
+            lock (gate)
+            {
+                if (disposed)
+                    return false;
+                task = next.Task;
+            }
+
+            try
+            {
+                return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+        }
+
+        public void Signal()
+        {
+            TaskCompletionSource<bool> current;
+            lock (gate)
+            {
+                if (disposed)
+                    return;
+                current = next;
+                next = CreateSource();
+            }
+
+            current.TrySetResult(true);
+        }
+
+        public void Dispose()
+        {
+            TaskCompletionSource<bool> current;
+            lock (gate)
+            {
+                if (disposed)
+                    return;
+                disposed = true;
+                current = next;
+            }
+
+            current.TrySetResult(false);
+        }
+
+        private static TaskCompletionSource<bool> CreateSource() =>
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    private sealed class FakeProcessPerformanceReader : IProcessPerformanceReader
+    {
+        private readonly TimeSpan totalProcessorTime;
+        private readonly long workingSetBytes;
+        private bool refreshed;
+
+        public FakeProcessPerformanceReader(TimeSpan totalProcessorTime, long workingSetBytes)
+        {
+            this.totalProcessorTime = totalProcessorTime;
+            this.workingSetBytes = workingSetBytes;
+        }
+
+        public int RefreshCount { get; private set; }
+
+        public void Refresh()
+        {
+            RefreshCount++;
+            refreshed = true;
+        }
+
+        public TimeSpan TotalProcessorTime =>
+            refreshed ? totalProcessorTime : throw new InvalidOperationException("Refresh was not called.");
+
+        public long WorkingSet64 =>
+            refreshed ? workingSetBytes : throw new InvalidOperationException("Refresh was not called.");
+
+        public void Dispose()
+        {
+        }
     }
 
     private static int GetActiveWaiters(OwnedProcess process)

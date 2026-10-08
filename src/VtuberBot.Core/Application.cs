@@ -4,7 +4,8 @@ public sealed class VtuberApplication
 {
     public const string InternalTestEvent = "internal.test";
     public const string CommandExecutedEvent = "command.executed";
-    public const string Version = "0.2.0";
+    public const string HealthUpdatedEvent = "health.updated";
+    public const string Version = "0.2.1";
 
     private readonly string? configPath;
     private AppState state = AppState.Stopped;
@@ -15,6 +16,8 @@ public sealed class VtuberApplication
     private TaskScheduler? scheduler;
     private AppConfig? config;
     private CommandRouter? commandRouter;
+    private PerformanceMonitor? performanceMonitor;
+    private HealthSnapshot? latestHealth;
     private int processed;
 
     public VtuberApplication(string? configPath = null) =>
@@ -28,6 +31,15 @@ public sealed class VtuberApplication
     public ResourceManager ResourceManager => resources ?? throw new InvalidOperationException();
     public CommandRouter CommandRouter =>
         commandRouter ?? throw new InvalidOperationException();
+    public PerformanceMonitor PerformanceMonitor =>
+        performanceMonitor ?? throw new InvalidOperationException();
+
+    public HealthSnapshot? LatestHealth =>
+        Volatile.Read(ref latestHealth);
+
+    public PerformanceProfile PerformanceProfile =>
+        performanceMonitor?.Profile ?? PerformanceProfile.Equilibrado;
+
     public int InternalTestEventsProcessed => processed;
 
     public void Initialize()
@@ -56,6 +68,16 @@ public sealed class VtuberApplication
             commandRouter = new(logger);
             RegisterCommands();
 
+            performanceMonitor = new(
+                new CurrentProcessPerformanceProbe(),
+                new NullGpuPerformanceProbe(),
+                new NullFpsSource(),
+                new SystemHealthClock(),
+                new PeriodicTimerFactory(),
+                logger);
+            performanceMonitor.SnapshotPublished += PublishHealthSnapshot;
+            resources.Register("performance-monitor", performanceMonitor.Dispose);
+
             events.Subscribe(InternalTestEvent, _ =>
             {
                 processed++;
@@ -64,6 +86,7 @@ public sealed class VtuberApplication
             events.Emit(new(InternalTestEvent));
 
             state = AppState.Running;
+            performanceMonitor.Start();
         }
         catch (Exception exception)
         {
@@ -93,6 +116,11 @@ public sealed class VtuberApplication
         return result;
     }
 
+    public void SetPerformanceProfile(PerformanceProfile newProfile)
+    {
+        PerformanceMonitor.SetProfile(newProfile);
+    }
+
     public void Shutdown()
     {
         if (state == AppState.Stopped)
@@ -112,9 +140,17 @@ public sealed class VtuberApplication
             scheduler = null;
             resources = null;
             commandRouter = null;
+            performanceMonitor = null;
+            Volatile.Write(ref latestHealth, null);
             config = null;
             logger = null;
         }
+    }
+
+    private void PublishHealthSnapshot(HealthSnapshot snapshot)
+    {
+        Volatile.Write(ref latestHealth, snapshot);
+        events?.Emit(new AppEvent(HealthUpdatedEvent, snapshot));
     }
 
     private void RegisterCommands()
