@@ -335,7 +335,7 @@ public sealed class Tests
             TimeSpan.FromSeconds(2),
             TestContext.Current.CancellationToken);
 
-        Assert.Equal(1L, database.ExecuteScalar("SELECT COUNT(*) FROM sample"));
+        Assert.Equal(0L, database.ExecuteScalar("SELECT COUNT(*) FROM sample"));
 
         release.TrySetResult(true);
         await writerTask.WaitAsync(
