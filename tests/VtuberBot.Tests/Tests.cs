@@ -740,6 +740,42 @@ public sealed class Tests
     }
 
     [Fact]
+    public async Task MonitorRejectsInvalidProfileAndRetainsPreviousPolicy()
+    {
+        var clock = new FakeHealthClock(DateTimeOffset.UnixEpoch);
+        var timers = new FakePeriodicTimerFactory();
+        var process = new SequenceProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(1), 100),
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(2), 110));
+        using var monitor = CreateMonitor(process, clock: clock, timers: timers);
+
+        monitor.SetProfile(PerformanceProfile.Ahorro);
+        var previousPolicy = monitor.Policy;
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => monitor.SetProfile((PerformanceProfile)99));
+
+        Assert.Equal(PerformanceProfile.Ahorro, monitor.Profile);
+        Assert.Equal(previousPolicy, monitor.Policy);
+
+        var secondSnapshot = new TaskCompletionSource<HealthSnapshot>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        monitor.SnapshotPublished += snapshot =>
+        {
+            if (snapshot.Timestamp > DateTimeOffset.UnixEpoch)
+                secondSnapshot.TrySetResult(snapshot);
+        };
+
+        monitor.Start();
+        clock.Advance(TimeSpan.FromSeconds(5));
+        timers.Last.Signal();
+
+        var snapshot = await secondSnapshot.Task.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(PerformanceProfile.Ahorro, snapshot.Profile);
+        Assert.Equal(TimeSpan.FromSeconds(5), timers.Last.Period);
+    }
+
+    [Fact]
     public void HealthSnapshotCopiesIssues()
     {
         var issues = new List<HealthIssue> { new("GPU", "Unavailable", Optional: true) };
@@ -787,6 +823,74 @@ public sealed class Tests
                 DateTimeOffset.UnixEpoch,
                 DateTimeOffset.UnixEpoch,
                 processorCount: 4));
+    }
+
+    [Fact]
+    public void CpuCalculationReturnsNullForNegativeCpuDelta()
+    {
+        var previous = new ProcessPerformanceSample(TimeSpan.FromSeconds(11), 100);
+        var current = new ProcessPerformanceSample(TimeSpan.FromSeconds(10), 100);
+
+        Assert.Null(
+            PerformanceMonitor.CalculateCpuPercent(
+                previous,
+                current,
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch.AddSeconds(2),
+                processorCount: 4));
+    }
+
+    [Fact]
+    public void CpuCalculationRejectsNonPositiveProcessorCount()
+    {
+        var sample = new ProcessPerformanceSample(TimeSpan.FromSeconds(10), 100);
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => PerformanceMonitor.CalculateCpuPercent(
+                sample,
+                sample,
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch.AddSeconds(1),
+                processorCount: 0));
+
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => PerformanceMonitor.CalculateCpuPercent(
+                sample,
+                sample,
+                DateTimeOffset.UnixEpoch,
+                DateTimeOffset.UnixEpoch.AddSeconds(1),
+                processorCount: -1));
+    }
+
+    [Fact]
+    public void CpuCalculationClampsUpperBound()
+    {
+        var previous = new ProcessPerformanceSample(TimeSpan.Zero, 100);
+        var current = new ProcessPerformanceSample(TimeSpan.FromSeconds(20), 100);
+
+        var result = PerformanceMonitor.CalculateCpuPercent(
+            previous,
+            current,
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch.AddSeconds(2),
+            processorCount: 1);
+
+        Assert.Equal(100, result);
+    }
+
+    [Fact]
+    public void CpuCalculationReachesLowerBoundAtZero()
+    {
+        var sample = new ProcessPerformanceSample(TimeSpan.FromSeconds(10), 100);
+
+        var result = PerformanceMonitor.CalculateCpuPercent(
+            sample,
+            sample,
+            DateTimeOffset.UnixEpoch,
+            DateTimeOffset.UnixEpoch.AddSeconds(2),
+            processorCount: 4);
+
+        Assert.Equal(0, result);
     }
 
     [Fact]
@@ -1031,6 +1135,117 @@ public sealed class Tests
 
         _ = await secondSnapshot.Task.WaitAsync(TestContext.Current.CancellationToken);
         Assert.True(monitor.IsRunning);
+    }
+
+    [Fact]
+    public async Task MonitorSnapshotCallbackCanStopMonitorWithoutDeadlock()
+    {
+        var process = new SequenceProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(1), 100));
+        using var monitor = CreateMonitor(process);
+
+        var callbackEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbackReturned = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        monitor.SnapshotPublished += _ =>
+        {
+            callbackEntered.TrySetResult(true);
+            monitor.Stop();
+            callbackReturned.TrySetResult(true);
+        };
+
+        var startTask = System.Threading.Tasks.Task.Run(() => monitor.Start());
+
+        await callbackEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+        await callbackReturned.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+        await startTask.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(monitor.IsRunning);
+    }
+
+    [Fact]
+    public async Task MonitorSnapshotCallbackCanDisposeMonitorWithoutDeadlock()
+    {
+        var process = new SequenceProcessProbe(
+            new ProcessPerformanceSample(TimeSpan.FromSeconds(1), 100));
+        using var monitor = CreateMonitor(process);
+
+        var callbackEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbackReturned = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        monitor.SnapshotPublished += _ =>
+        {
+            callbackEntered.TrySetResult(true);
+            monitor.Dispose();
+            callbackReturned.TrySetResult(true);
+        };
+
+        var startTask = System.Threading.Tasks.Task.Run(() => monitor.Start());
+
+        await callbackEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+        await callbackReturned.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+        await startTask.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(monitor.IsRunning);
+        Assert.Throws<ObjectDisposedException>(
+            () => monitor.SetProfile(PerformanceProfile.Calidad));
+    }
+
+    [Fact]
+    public async Task ApplicationShutdownFromHealthEventDoesNotDeadlock()
+    {
+        using var directory = new TempDirectory();
+        var configPath = directory.File("config.toml");
+        File.WriteAllText(configPath, "[database]\npath = \"a.db\"");
+
+        var application = new VtuberApplication(configPath);
+        application.Initialize();
+        var monitor = application.PerformanceMonitor;
+
+        var callbackEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbackReturned = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        application.EventManager.Subscribe(
+            VtuberApplication.HealthUpdatedEvent,
+            _ =>
+            {
+                callbackEntered.TrySetResult(true);
+                application.Shutdown();
+                callbackReturned.TrySetResult(true);
+            });
+
+        application.SetPerformanceProfile(PerformanceProfile.Calidad);
+
+        await callbackEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+        await callbackReturned.Task.WaitAsync(
+            TimeSpan.FromSeconds(5),
+            TestContext.Current.CancellationToken);
+
+        monitor.Stop();
+
+        Assert.Equal(AppState.Stopped, application.State);
+        Assert.False(monitor.IsRunning);
+        Assert.Null(application.LatestHealth);
     }
 
     [Fact]
