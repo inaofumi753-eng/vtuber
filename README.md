@@ -14,7 +14,7 @@ V0.2.0 is limited to the local Control Plane + Command Core. Twitch, STT, TTS, V
 
 ## V0.2.0 status
 
-V0.1 is closed. V0.2.0 is implemented on a dedicated branch and awaits GPT Cerebro review before merge.
+V0.1 and V0.2.0 are closed and integrated in `main`. V0.2.1 Performance + Health is currently under implementation on a dedicated branch.
 
 ## Build
 
