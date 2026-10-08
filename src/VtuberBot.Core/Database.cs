@@ -65,7 +65,7 @@ public sealed class SqliteDatabase : IDisposable
 
     public void InitializeSchema()
     {
-        writerGate.Wait();
+        EnterWriterGate();
 
         try
         {
@@ -126,7 +126,7 @@ public sealed class SqliteDatabase : IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         ArgumentNullException.ThrowIfNull(parameters);
 
-        writerGate.Wait();
+        EnterWriterGate();
 
         try
         {
@@ -147,6 +147,29 @@ public sealed class SqliteDatabase : IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         ArgumentNullException.ThrowIfNull(parameters);
 
+        EnterWriterGate();
+
+        try
+        {
+            using var connection = AcquireConnection();
+            using var command = CreateCommand(connection, sql, null, parameters);
+            var value = command.ExecuteScalar();
+
+            return value is DBNull ? null : value;
+        }
+        finally
+        {
+            writerGate.Release();
+        }
+    }
+
+    public object? QueryScalar(
+        string sql,
+        params (string Name, object? Value)[] parameters)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sql);
+        ArgumentNullException.ThrowIfNull(parameters);
+
         using var connection = AcquireConnection();
         using var command = CreateCommand(connection, sql, null, parameters);
         var value = command.ExecuteScalar();
@@ -159,7 +182,7 @@ public sealed class SqliteDatabase : IDisposable
     {
         ArgumentNullException.ThrowIfNull(operation);
 
-        writerGate.Wait();
+        EnterWriterGate();
 
         try
         {
@@ -205,6 +228,23 @@ public sealed class SqliteDatabase : IDisposable
 
             disposed = true;
             open = false;
+        }
+    }
+
+    private void EnterWriterGate()
+    {
+        ThrowIfNotOpen();
+
+        writerGate.Wait();
+
+        try
+        {
+            ThrowIfNotOpen();
+        }
+        catch
+        {
+            writerGate.Release();
+            throw;
         }
     }
 
@@ -363,6 +403,17 @@ public sealed class SqliteDatabase : IDisposable
         var value = command.ExecuteScalar();
 
         return value is DBNull ? null : value;
+    }
+
+    private void ThrowIfNotOpen()
+    {
+        lock (lifecycleGate)
+        {
+            ThrowIfDisposed();
+
+            if (!open)
+                throw new InvalidOperationException("SQLite database is not open.");
+        }
     }
 
     private void ThrowIfDisposed()
