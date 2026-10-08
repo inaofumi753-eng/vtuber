@@ -46,68 +46,87 @@ public sealed class TaskScheduler : IDisposable
 
     private async Task Run(CancellationToken token)
     {
-        while (!token.IsCancellationRequested)
+        try
         {
-            (long Id, DateTimeOffset DueAt, Action Callback)? next;
-
-            lock (gate)
-                next = queue.Count == 0 ? null : queue[0];
-
-            if (next is null)
+            while (!token.IsCancellationRequested)
             {
-                try
-                {
-                    await Task.Delay(25, token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
+                (long Id, DateTimeOffset DueAt, Action Callback)? next;
 
-                continue;
-            }
+                lock (gate)
+                    next = queue.Count == 0 ? null : queue[0];
 
-            var delay = next.Value.DueAt - DateTimeOffset.UtcNow;
-            if (delay > TimeSpan.Zero)
-            {
-                try
+                if (next is null)
                 {
-                    await Task.Delay(delay, token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
+                    try
+                    {
+                        await Task.Delay(25, token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
 
-                continue;
-            }
-
-            lock (gate)
-            {
-                if (queue.Count == 0 || queue[0].Id != next.Value.Id)
                     continue;
+                }
 
-                queue.RemoveAt(0);
-            }
+                var delay = next.Value.DueAt - DateTimeOffset.UtcNow;
+                if (delay > TimeSpan.Zero)
+                {
+                    try
+                    {
+                        await Task.Delay(delay, token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
 
-            var previousWorkerScheduler = currentWorkerScheduler;
-            currentWorkerScheduler = this;
+                    continue;
+                }
 
-            try
-            {
+                lock (gate)
+                {
+                    if (queue.Count == 0 || queue[0].Id != next.Value.Id)
+                        continue;
+
+                    queue.RemoveAt(0);
+                }
+
+                var previousWorkerScheduler = currentWorkerScheduler;
+                currentWorkerScheduler = this;
+
                 try
                 {
-                    next.Value.Callback();
+                    try
+                    {
+                        next.Value.Callback();
+                    }
+                    catch (Exception exception)
+                    {
+                        logger.Error(exception, "Scheduled task {0} failed.", next.Value.Id);
+                    }
                 }
-                catch (Exception exception)
+                finally
                 {
-                    logger.Error(exception, "Scheduled task {0} failed.", next.Value.Id);
+                    currentWorkerScheduler = previousWorkerScheduler;
                 }
             }
-            finally
+        }
+        finally
+        {
+            CancellationTokenSource? cancellationToDispose = null;
+
+            lock (gate)
             {
-                currentWorkerScheduler = previousWorkerScheduler;
+                if (cancellation?.Token == token)
+                {
+                    worker = null;
+                    cancellationToDispose = cancellation;
+                    cancellation = null;
+                }
             }
+
+            cancellationToDispose?.Dispose();
         }
     }
 
@@ -137,22 +156,6 @@ public sealed class TaskScheduler : IDisposable
             {
                 logger.Error(exception, "Task scheduler worker failed during shutdown.");
             }
-        }
-        finally
-        {
-            CancellationTokenSource? cancellationToDispose = null;
-
-            lock (gate)
-            {
-                if (cancellation?.Token == token)
-                {
-                    worker = null;
-                    cancellationToDispose = cancellation;
-                    cancellation = null;
-                }
-            }
-
-            cancellationToDispose?.Dispose();
         }
     }
 
