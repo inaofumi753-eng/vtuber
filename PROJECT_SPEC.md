@@ -33,7 +33,21 @@ SQLite will contain users, points, rankings, inventory, statistics, giveaways, g
 Unit tests, event integration tests, SQLite persistence tests, queue tests, recovery tests and startup smoke tests.
 
 ## Development flow
-GPT Cerebro designs -> GPT Obrero implements -> tests -> Gemini Inspector reviews -> Cerebro decides -> Obrero corrects -> tests -> release.
+GPT Cerebro
+    ↓
+GPT Obrero
+    ↓
+GitHub
+    ↓
+Tests + CI
+    ↓
+GPT Cerebro
+    ↓
+GPT Obrero if corrections needed
+    ↓
+Tests + CI
+    ↓
+Merge / Release
 
 ## Open decisions
 Twitch method under the no-API constraint, local TTS engine, final 2.5D renderer, Telegram integration method, optional OBS control, avatar asset format and packaging strategy.
