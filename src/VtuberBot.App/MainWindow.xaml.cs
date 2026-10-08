@@ -199,7 +199,7 @@ public sealed class Vm : INotifyPropertyChanged
     public string HealthDisplay => health.ToString();
 
     public string SamplingIntervalDisplay =>
-        application.PerformanceMonitor.Policy.SamplingInterval.TotalSeconds.ToString("0.#") + " s";
+        PerformancePolicy.GetSamplingInterval(application.PerformanceProfile).TotalSeconds.ToString("0.#") + " s";
 
     public string LastSampleDisplay =>
         lastSample is null
