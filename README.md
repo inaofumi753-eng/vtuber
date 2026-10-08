@@ -14,7 +14,11 @@ V0.2.0 is limited to the local Control Plane + Command Core. Twitch, STT, TTS, V
 
 ## V0.2.0 status
 
-V0.1, V0.2.0 and V0.2.1 are closed and integrated in `main`. V0.2.2 SQLite Concurrency Hardening is currently under implementation.
+V0.1   = CLOSED / MERGED
+V0.2.0 = CLOSED / MERGED
+V0.2.1 = CLOSED / MERGED
+V0.2.2 = CLOSED / MERGED
+V0.2.3 = NOT STARTED
 
 ## Build
 
