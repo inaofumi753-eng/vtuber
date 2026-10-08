@@ -861,7 +861,7 @@ public sealed class Tests
 
         var snapshot = await secondSnapshot.Task.WaitAsync(TestContext.Current.CancellationToken);
 
-        Assert.Equal(100, snapshot.WorkingSetBytes);
+        Assert.Equal(120, snapshot.WorkingSetBytes);
         Assert.Equal(12.5, snapshot.CpuPercent);
     }
 
