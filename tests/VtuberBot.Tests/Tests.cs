@@ -163,7 +163,17 @@ public sealed class Tests
 
 
     [Fact]
-    public void DatabaseCreatesSchemaAndEnablesForeignKeys()
+    public void DatabaseHasNoSharedPublicConnection()
+    {
+        Assert.Null(typeof(SqliteDatabase).GetProperty("Connection"));
+
+        Assert.DoesNotContain(
+            typeof(SqliteDatabase).GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic),
+            field => field.FieldType == typeof(SqliteConnection));
+    }
+
+    [Fact]
+    public void DatabaseCreatesSchemaAndConfiguresRequiredSettings()
     {
         using var directory = new TempDirectory();
         using var database = new SqliteDatabase(directory.File("a.db"));
@@ -171,16 +181,16 @@ public sealed class Tests
         database.Open();
         database.InitializeSchema();
 
-        using var command = database.Connection!.CreateCommand();
-        command.CommandText = "PRAGMA foreign_keys";
-        Assert.Equal(1L, command.ExecuteScalar());
-
-        command.CommandText = "SELECT value FROM schema_meta WHERE key = 'schema_version'";
-        Assert.Equal(SqliteDatabase.SchemaVersion.ToString(), command.ExecuteScalar());
+        Assert.Equal(1L, database.ExecuteScalar("PRAGMA foreign_keys"));
+        Assert.Equal(2L, database.ExecuteScalar("PRAGMA synchronous"));
+        Assert.Equal("wal", database.ExecuteScalar("PRAGMA journal_mode"));
+        Assert.Equal(
+            SqliteDatabase.SchemaVersion.ToString(),
+            database.ExecuteScalar("SELECT value FROM schema_meta WHERE key = 'schema_version'"));
     }
 
     [Fact]
-    public void DatabaseExecuteUsesParameters()
+    public void DatabaseExecuteAndScalarUseParameters()
     {
         using var directory = new TempDirectory();
         using var database = new SqliteDatabase(directory.File("a.db"));
@@ -193,26 +203,34 @@ public sealed class Tests
                 "INSERT INTO sample(value) VALUES ($value)",
                 ("$value", "hello")));
 
-        using var command = database.Connection!.CreateCommand();
-        command.CommandText = "SELECT value FROM sample";
-        Assert.Equal("hello", command.ExecuteScalar());
+        Assert.Equal(
+            "hello",
+            database.ExecuteScalar(
+                "SELECT value FROM sample WHERE value = $value",
+                ("$value", "hello")));
     }
 
     [Fact]
-    public void DatabaseCloseIsIdempotentAndAccessAfterCloseFails()
+    public void DatabaseOpenAndCloseAreIdempotentAndReopenWorks()
     {
         using var directory = new TempDirectory();
-        var database = new SqliteDatabase(directory.File("a.db"));
+        using var database = new SqliteDatabase(directory.File("a.db"));
 
         database.Open();
+        database.Open();
+        database.InitializeSchema();
         database.Close();
         database.Close();
 
         Assert.Throws<InvalidOperationException>(() => database.Execute("SELECT 1"));
+
+        database.Open();
+        Assert.Equal(1L, database.ExecuteScalar("PRAGMA foreign_keys"));
+        Assert.Equal(2L, database.ExecuteScalar("PRAGMA synchronous"));
     }
 
     [Fact]
-    public void DatabaseSqlErrorIsReported()
+    public void DatabaseSqlErrorDoesNotPoisonSubsequentOperations()
     {
         using var directory = new TempDirectory();
         using var database = new SqliteDatabase(directory.File("a.db"));
@@ -220,6 +238,411 @@ public sealed class Tests
         database.Open();
 
         Assert.Throws<SqliteException>(() => database.Execute("THIS IS NOT SQL"));
+        Assert.Equal(1L, database.ExecuteScalar("SELECT 1"));
+    }
+
+    [Fact]
+    public void DatabaseInitializeSchemaIsIdempotent()
+    {
+        using var directory = new TempDirectory();
+        using var database = new SqliteDatabase(directory.File("a.db"));
+
+        database.Open();
+        database.InitializeSchema();
+        database.InitializeSchema();
+
+        Assert.Equal(
+            SqliteDatabase.SchemaVersion.ToString(),
+            database.ExecuteScalar("SELECT value FROM schema_meta WHERE key = 'schema_version'"));
+    }
+
+
+    [Fact]
+    public async Task DatabaseSupportsConcurrentReaders()
+    {
+        using var directory = new TempDirectory();
+        using var database = new SqliteDatabase(directory.File("a.db"));
+
+        database.Open();
+        database.InitializeSchema();
+
+        var tasks = Enumerable.Range(0, 24)
+            .Select(_ => System.Threading.Tasks.Task.Run(
+                () => database.ExecuteScalar("SELECT 1"),
+                TestContext.Current.CancellationToken))
+            .ToArray();
+
+        var results = await System.Threading.Tasks.Task.WhenAll(tasks);
+
+        Assert.All(results, result => Assert.Equal(1L, result));
+    }
+
+    [Fact]
+    public async Task DatabaseSerializesConcurrentWriters()
+    {
+        using var directory = new TempDirectory();
+        using var database = new SqliteDatabase(directory.File("a.db"));
+
+        database.Open();
+        database.InitializeSchema();
+        database.Execute("CREATE TABLE sample(value INTEGER NOT NULL)");
+
+        var tasks = Enumerable.Range(0, 32)
+            .Select(value => System.Threading.Tasks.Task.Run(
+                () => database.Execute(
+                    "INSERT INTO sample(value) VALUES ($value)",
+                    ("$value", value)),
+                TestContext.Current.CancellationToken))
+            .ToArray();
+
+        await System.Threading.Tasks.Task.WhenAll(tasks);
+
+        Assert.Equal(32L, database.ExecuteScalar("SELECT COUNT(*) FROM sample"));
+    }
+
+    [Fact]
+    public async Task DatabaseAllowsReadersWhileWriterIsActive()
+    {
+        using var directory = new TempDirectory();
+        using var database = new SqliteDatabase(directory.File("a.db"));
+
+        database.Open();
+        database.InitializeSchema();
+        database.Execute("CREATE TABLE sample(value INTEGER NOT NULL)");
+
+        var entered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var writerTask = System.Threading.Tasks.Task.Run(
+            () =>
+            {
+                database.ExecuteTransaction((connection, transaction) =>
+                {
+                    entered.TrySetResult(true);
+                    release.Task.GetAwaiter().GetResult();
+
+                    using var command = connection.CreateCommand();
+                    command.Transaction = transaction;
+                    command.CommandText = "INSERT INTO sample(value) VALUES (1)";
+                    command.ExecuteNonQuery();
+                });
+            },
+            TestContext.Current.CancellationToken);
+
+        await entered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(1L, database.ExecuteScalar("SELECT COUNT(*) FROM sample"));
+
+        release.TrySetResult(true);
+        await writerTask.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(1L, database.ExecuteScalar("SELECT COUNT(*) FROM sample"));
+    }
+
+    [Fact]
+    public async Task DatabaseWriterGateBlocksSecondWriterUntilFirstTransactionCompletes()
+    {
+        using var directory = new TempDirectory();
+        using var database = new SqliteDatabase(directory.File("a.db"));
+
+        database.Open();
+        database.InitializeSchema();
+        database.Execute("CREATE TABLE sample(value INTEGER NOT NULL)");
+
+        var firstEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondStarted = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var firstWriter = System.Threading.Tasks.Task.Run(
+            () =>
+            {
+                database.ExecuteTransaction((connection, transaction) =>
+                {
+                    firstEntered.TrySetResult(true);
+                    release.Task.GetAwaiter().GetResult();
+                    using var command = connection.CreateCommand();
+                    command.Transaction = transaction;
+                    command.CommandText = "INSERT INTO sample(value) VALUES (1)";
+                    command.ExecuteNonQuery();
+                });
+            },
+            TestContext.Current.CancellationToken);
+
+        await firstEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+
+        var secondWriter = System.Threading.Tasks.Task.Run(
+            () =>
+            {
+                secondStarted.TrySetResult(true);
+                return database.Execute(
+                    "INSERT INTO sample(value) VALUES (2)");
+            },
+            TestContext.Current.CancellationToken);
+
+        await secondStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+        Assert.False(secondWriter.IsCompleted);
+
+        release.TrySetResult(true);
+
+        await System.Threading.Tasks.Task.WhenAll(
+            firstWriter.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken),
+            secondWriter.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken));
+
+        Assert.Equal(2L, database.ExecuteScalar("SELECT COUNT(*) FROM sample"));
+    }
+
+    [Fact]
+    public void DatabaseTransactionRollsBackOnFailure()
+    {
+        using var directory = new TempDirectory();
+        using var database = new SqliteDatabase(directory.File("a.db"));
+
+        database.Open();
+        database.InitializeSchema();
+        database.Execute("CREATE TABLE sample(value INTEGER NOT NULL)");
+
+        Assert.Throws<InvalidOperationException>(() =>
+            database.ExecuteTransaction((connection, transaction) =>
+            {
+                using var first = connection.CreateCommand();
+                first.Transaction = transaction;
+                first.CommandText = "INSERT INTO sample(value) VALUES (1)";
+                first.ExecuteNonQuery();
+
+                using var second = connection.CreateCommand();
+                second.Transaction = transaction;
+                second.CommandText = "INSERT INTO sample(value) VALUES (2)";
+                second.ExecuteNonQuery();
+
+                throw new InvalidOperationException("expected rollback");
+            }));
+
+        Assert.Equal(0L, database.ExecuteScalar("SELECT COUNT(*) FROM sample"));
+    }
+
+    [Fact]
+    public async Task DatabaseCloseDoesNotInterruptAlreadyAcquiredTransaction()
+    {
+        using var directory = new TempDirectory();
+        using var database = new SqliteDatabase(directory.File("a.db"));
+
+        database.Open();
+        database.InitializeSchema();
+        database.Execute("CREATE TABLE sample(value INTEGER NOT NULL)");
+
+        var entered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var transactionTask = System.Threading.Tasks.Task.Run(
+            () =>
+                database.ExecuteTransaction((connection, transaction) =>
+                {
+                    entered.TrySetResult(true);
+                    release.Task.GetAwaiter().GetResult();
+
+                    using var command = connection.CreateCommand();
+                    command.Transaction = transaction;
+                    command.CommandText = "INSERT INTO sample(value) VALUES (7)";
+                    command.ExecuteNonQuery();
+                }),
+            TestContext.Current.CancellationToken);
+
+        await entered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+
+        database.Close();
+        Assert.Throws<InvalidOperationException>(() => database.ExecuteScalar("SELECT 1"));
+
+        release.TrySetResult(true);
+        await transactionTask.WaitAsync(
+            TimeSpan.FromSeconds(2),
+            TestContext.Current.CancellationToken);
+
+        database.Open();
+        Assert.Equal(1L, database.ExecuteScalar("SELECT COUNT(*) FROM sample"));
+    }
+
+    [Fact]
+    public void DatabaseRejectsFutureSchemaVersionWithoutDowngrade()
+    {
+        using var directory = new TempDirectory();
+        var path = directory.File("a.db");
+
+        using (var connection = new SqliteConnection(
+            $"Data Source={path};Pooling=False"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL); " +
+                "INSERT INTO schema_meta(key, value) VALUES ('schema_version', '99');";
+            command.ExecuteNonQuery();
+        }
+
+        using var database = new SqliteDatabase(path);
+        database.Open();
+
+        var exception = Assert.Throws<SqliteSchemaException>(
+            () => database.InitializeSchema());
+
+        Assert.Contains("newer than supported", exception.Message);
+        Assert.Equal("99", database.ExecuteScalar(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"));
+    }
+
+    [Fact]
+    public void DatabaseRejectsInvalidSchemaVersion()
+    {
+        using var directory = new TempDirectory();
+        var path = directory.File("a.db");
+
+        using (var connection = new SqliteConnection(
+            $"Data Source={path};Pooling=False"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                "CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL); " +
+                "INSERT INTO schema_meta(key, value) VALUES ('schema_version', 'abc');";
+            command.ExecuteNonQuery();
+        }
+
+        using var database = new SqliteDatabase(path);
+        database.Open();
+
+        Assert.Throws<SqliteSchemaException>(() => database.InitializeSchema());
+        Assert.Equal("abc", database.ExecuteScalar(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"));
+    }
+
+    [Fact]
+    public void DatabaseMigrationFailureRollsBackAndCanRecover()
+    {
+        using var directory = new TempDirectory();
+        var path = directory.File("a.db");
+
+        using (var connection = new SqliteConnection(
+            $"Data Source={path};Pooling=False"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                "CREATE TABLE schema_meta(" +
+                "key TEXT PRIMARY KEY, " +
+                "value TEXT NOT NULL CHECK(value = 'never-valid'));";
+            command.ExecuteNonQuery();
+        }
+
+        using var database = new SqliteDatabase(path);
+        database.Open();
+
+        Assert.Throws<SqliteException>(() => database.InitializeSchema());
+
+        Assert.Null(database.ExecuteScalar(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"));
+
+        database.Close();
+
+        using (var connection = new SqliteConnection(
+            $"Data Source={path};Pooling=False"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "DROP TABLE schema_meta";
+            command.ExecuteNonQuery();
+        }
+
+        database.Open();
+        database.InitializeSchema();
+
+        Assert.Equal(
+            SqliteDatabase.SchemaVersion.ToString(),
+            database.ExecuteScalar("SELECT value FROM schema_meta WHERE key = 'schema_version'"));
+    }
+
+    [Fact]
+    public async Task DatabaseRetriesBusyUntilExternalLockIsReleased()
+    {
+        using var directory = new TempDirectory();
+        var path = directory.File("a.db");
+        using var database = new SqliteDatabase(path);
+
+        database.Open();
+        database.InitializeSchema();
+        database.Execute("CREATE TABLE sample(value INTEGER NOT NULL)");
+
+        using var locker = new SqliteConnection(
+            $"Data Source={path};Pooling=False;Default Timeout=5");
+        locker.Open();
+        using var transaction = locker.BeginTransaction(deferred: false);
+
+        var writeTask = System.Threading.Tasks.Task.Run(
+            () => database.Execute(
+                "INSERT INTO sample(value) VALUES (1)"),
+            TestContext.Current.CancellationToken);
+
+        var completedEarly = await System.Threading.Tasks.Task.WhenAny(
+            writeTask,
+            System.Threading.Tasks.Task.Delay(
+                TimeSpan.FromMilliseconds(250),
+                TestContext.Current.CancellationToken));
+
+        Assert.NotSame(writeTask, completedEarly);
+
+        transaction.Rollback();
+
+        Assert.Equal(
+            1,
+            await writeTask.WaitAsync(
+                TimeSpan.FromSeconds(2),
+                TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public void DatabaseBusyEventuallyFailsAtBoundedTimeoutAndRecovers()
+    {
+        using var directory = new TempDirectory();
+        var path = directory.File("a.db");
+        using var database = new SqliteDatabase(path);
+
+        database.Open();
+        database.InitializeSchema();
+        database.Execute("CREATE TABLE sample(value INTEGER NOT NULL)");
+
+        using var locker = new SqliteConnection(
+            $"Data Source={path};Pooling=False;Default Timeout=5");
+        locker.Open();
+        using var transaction = locker.BeginTransaction(deferred: false);
+
+        var start = Stopwatch.GetTimestamp();
+        var exception = Assert.Throws<SqliteException>(
+            () => database.Execute("INSERT INTO sample(value) VALUES (1)"));
+        var elapsed = Stopwatch.GetElapsedTime(start);
+
+        Assert.True(exception.SqliteErrorCode is 5 or 6);
+        Assert.InRange(elapsed, TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(8));
+
+        transaction.Rollback();
+
+        Assert.Equal(
+            1,
+            database.Execute("INSERT INTO sample(value) VALUES (2)"));
     }
 
     [Fact]
